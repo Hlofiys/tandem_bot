@@ -5,7 +5,7 @@ networks:
 services:
   tandem_bot:
     container_name: tandem_bot
-    image: hlofiys/tandem_bot:master
+    image: hlofiys/tandem_bot:main
     networks:
       - tandem_network
     depends_on:

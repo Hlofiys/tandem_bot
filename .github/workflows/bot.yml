@@ -2,7 +2,7 @@ name: Build and push bot
 on:
   push:
     branches:
-      - master
+      - main
 
 jobs:
   web:
