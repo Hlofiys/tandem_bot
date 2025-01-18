@@ -5,7 +5,7 @@ on:
       - main
 
 jobs:
-  web:
+  bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

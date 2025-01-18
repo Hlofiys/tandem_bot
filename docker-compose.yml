@@ -9,7 +9,7 @@ services:
     networks:
       - tandem_network
     depends_on:
-      - pulsometer_db
+      - tandem_db
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
     restart: unless-stopped
