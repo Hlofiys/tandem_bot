@@ -1,0 +1,31 @@
+---
+networks:
+  tandem_network:
+    driver: bridge
+services:
+  tandem_bot:
+    container_name: tandem_bot
+    image: hlofiys/tandem_bot:master
+    networks:
+      - tandem_network
+    depends_on:
+      - pulsometer_db
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+    restart: unless-stopped
+  tandem_db:
+    container_name: tandem_db
+    image: postgres:alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: bot
+    ports:
+      - 7000:5432
+    networks:
+      - tandem_network
+    restart: unless-stopped
+    volumes:
+      - postgres-data-tandem:/var/lib/postgresql/data
+volumes:
+  postgres-data-tandem:

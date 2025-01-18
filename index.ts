@@ -44,7 +44,7 @@ bot.telegram.setMyCommands(commands)
 // Инициализация подключения к базе данных PostgreSQL
 const pool = new Pool({
     user: 'postgres',
-    host: 'localhost',
+    host: 'tandem_db',
     database: 'bot',
     password: 'postgres',
     port: 5432,
