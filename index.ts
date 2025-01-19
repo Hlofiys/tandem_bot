@@ -94,7 +94,7 @@ const pool = new Pool({
 
 // Обработчик команды /start
 bot.start(async (ctx) => {
-    ctx.reply('Добро пожаловать в систему бронирования билетов! Введите /book для начала бронирования.');
+    ctx.reply('Добро пожаловать в в систему бронирования мест на ЗОК 2025 в 12:30. Введите /book для начала бронирования.');
 });
 
 // Обработчик команды /book
@@ -121,6 +121,160 @@ bot.command('book', async (ctx) => {
     );
 
     return ctx.reply('Выберите секцию:', Markup.inlineKeyboard(sectionButtons, { columns: 2 }));
+});
+
+
+bot.action(/^cancel_section_(.+)/, async (ctx) => {
+    const sectionName = ctx.match[1];
+    if (ctx.session == undefined) {
+        return;
+    }
+    ctx.session.selectedSection = sectionName;
+    // Get cancellable rows for this user in this section
+    const rows = await getCancellableRows(sectionName, ctx);
+    const sectionButtons = rows.map((row) =>
+        Markup.button.callback(`Ряд ${row.row_number}`, `cancel_row_${sectionName}_${row.row_number}`)
+    );
+    sectionButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
+
+    ctx.editMessageText(`Выберите ряд для отмены (Секция ${sectionName}):`, Markup.inlineKeyboard(sectionButtons, { columns: 3 }));
+});
+
+bot.action(/^cancel_row_(.+)_(.+)/, async (ctx) => {
+    const sectionName = ctx.match[1];
+    const rowNumber = parseInt(ctx.match[2], 10);
+    if (ctx.session == undefined) {
+        return;
+    }
+    ctx.session.selectedRow = rowNumber;
+
+
+    const seats = await getCancellableSeats(sectionName, rowNumber, ctx);
+
+    const selectedSeats = ctx.session?.selectedSeats || [];
+
+    const rowButtons = seats.map((seat) => {
+        let label = `Место ${seat.seat_number}`;
+        if (selectedSeats.some(s => s.section === sectionName && s.row === rowNumber && s.seat === seat.seat_number)) {
+            label += " ✅"; // Mark selected seats
+        }
+        return Markup.button.callback(label, `cancel_seat_${sectionName}_${rowNumber}_${seat.seat_number}`);
+    });
+
+    rowButtons.push(Markup.button.callback('Назад', `cancel_back_to_row_${sectionName}`));
+    if (selectedSeats.length > 0) {
+        rowButtons.push(Markup.button.callback('Подтвердить отмену', 'confirm_cancellation'));
+    }    
+    rowButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
+
+    ctx.editMessageText(`Выберите места для отмены (Секция ${sectionName}, Ряд ${rowNumber}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+});
+
+
+bot.action(/cancel_seat_(.+)_(.+)_(.+)/, async (ctx) => {
+    const [sectionName, rowNumberStr, seatNumberStr] = ctx.match.slice(1);
+    const rowNumber = parseInt(rowNumberStr, 10);
+    const seatNumber = parseInt(seatNumberStr, 10);
+
+    if(ctx.session == undefined)
+    {
+        return;
+    }
+
+    ctx.session.selectedSeats = ctx.session.selectedSeats || [];
+
+    const seatInfo = { section: sectionName, row: rowNumber, seat: seatNumber };
+
+    const existingSeatIndex = ctx.session.selectedSeats.findIndex(
+        (s) => s.section === sectionName && s.row === rowNumber && s.seat === seatNumber
+    );
+
+    if (existingSeatIndex > -1) {
+        ctx.session.selectedSeats.splice(existingSeatIndex, 1); // Remove if already selected
+        ctx.answerCbQuery(`Место ${seatNumber} снято с отмены.`);
+    } else {
+        ctx.session.selectedSeats.push(seatInfo); // Add to selected seats
+        ctx.answerCbQuery(`Место ${seatNumber} добавлено к отмене.`);
+    }
+
+     // Re-render the seats buttons with updated selection
+     const seats = await getCancellableSeats(sectionName, rowNumber, ctx);
+     const selectedSeats = ctx.session?.selectedSeats || [];
+
+    const rowButtons = seats.map((seat) => {
+        let label = `Место ${seat.seat_number}`;
+        if (selectedSeats.some(s => s.section === sectionName && s.row === rowNumber && s.seat === seat.seat_number)) {
+            label += " ✅"; // Mark selected seats
+        }
+        return Markup.button.callback(label, `cancel_seat_${sectionName}_${rowNumber}_${seat.seat_number}`);
+    });
+
+    rowButtons.push(Markup.button.callback('Назад', `cancel_back_to_row_${sectionName}`));
+    if (selectedSeats.length > 0) {
+        rowButtons.push(Markup.button.callback('Подтвердить отмену', 'confirm_cancellation'));
+    }
+    rowButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
+
+    ctx.editMessageText(`Выберите места для отмены (Секция ${sectionName}, Ряд ${rowNumber}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+
+});
+
+bot.action('confirm_cancellation', async (ctx) => {
+    if (!ctx.session || !ctx.session.selectedSeats || ctx.session.selectedSeats.length === 0) {
+        return ctx.reply('Вы не выбрали места для отмены.');
+    }
+
+    await ctx.deleteMessage();
+
+    const client = await pool.connect();
+    try {
+        const userId = (await client.query(`SELECT id FROM users WHERE telegram_id = $1`, [ctx.from?.id]))?.rows?.[0]?.id;
+
+
+        for (const seat of ctx.session.selectedSeats) {
+            const { rowCount } = await client.query(
+                `UPDATE seats SET is_booked = FALSE, booked_by = NULL
+                 WHERE row_id = (SELECT id FROM rows WHERE section_id = (SELECT id FROM sections WHERE name = $1) AND row_number = $2)
+                 AND seat_number = $3 AND booked_by = $4;`,
+                [seat.section, seat.row, seat.seat, userId]
+            );
+
+             if (rowCount !== 1) {
+                // Handle cases where a seat couldn't be cancelled (e.g., already cancelled by someone else)
+                ctx.reply(`Место ${seat.seat} в секции ${seat.section}, ряд ${seat.row} не найдено или не забронировано вами.`);
+                return; // Stop the loop and the cancellation process
+            }
+        }
+
+
+        ctx.reply(`${ctx.session.selectedSeats.length} мест(а) успешно отменено.`);
+        ctx.session.step = undefined; // Clear the session after cancellation
+        ctx.session.selectedSeats = []; // Clear selected seats
+
+    } catch (error) {
+        console.error('Error during seat cancellation:', error);
+        ctx.reply('Произошла ошибка при отмене бронирования.');
+    } finally {
+        client.release();
+        await ctx.answerCbQuery();
+
+    }
+});
+
+// Action handler for 'back' button during cancellation
+bot.action(/^cancel_back_to_row_(.+)/, async (ctx) => {
+    const sectionName = ctx.match[1];
+    if (ctx.session) {
+        ctx.session.selectedRow = undefined; // Reset selected row in session
+        const rows = await getCancellableRows(sectionName, ctx);
+        const rowButtons = rows.map((row) =>
+            Markup.button.callback(`Ряд ${row.row_number}`, `cancel_row_${sectionName}_${row.row_number}`)
+        );
+
+
+        rowButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
+        ctx.editMessageText(`Выберите ряд для отмены (Секция ${sectionName}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+    }
 });
 
 // Обработчики кнопок выбора секции, ряда и места
@@ -400,111 +554,100 @@ bot.command('mybookings', async (ctx) => {
 bot.command('cancel', async (ctx) => {
     const client = await pool.connect();
     try {
-        const { rows: bookings } = await client.query(
-            `SELECT sections.name AS section_name, rows.row_number, seats.seat_number
-         FROM seats
-         JOIN rows ON rows.id = seats.row_id
-         JOIN sections ON sections.id = rows.section_id
-         WHERE seats.booked_by = (SELECT id FROM users WHERE telegram_id = $1);
-        `,
-            [ctx.from?.id]
-        );
+        const userId = (await client.query(`SELECT id FROM users WHERE telegram_id = $1`, [ctx.from?.id]))?.rows?.[0]?.id;
 
-        if (bookings.length === 0) {
+        if (!userId) {
             ctx.reply('У вас нет активных броней.');
             return;
         }
 
-        const sections: Record<string, Record<number, number[]>> = {};
-        for (const booking of bookings) {
-            if (!sections[booking.section_name]) sections[booking.section_name] = {};
-            if (!sections[booking.section_name][booking.row_number]) sections[booking.section_name][booking.row_number] = [];
-            sections[booking.section_name][booking.row_number].push(booking.seat_number);
+        ctx.session = { selectedSeats: [], step: 'cancel_seat' }; // Initialize session for cancellation
+
+        const sections = await getCancellableSections(userId); // Get sections with bookable seats by this user
+
+
+        if (sections.length === 0) {
+            ctx.reply('У вас нет активных броней.');
+            delete ctx.session.step;  //Clear session if no bookings
+            return;
         }
 
-        for (const section in sections) {
-            await ctx.reply(`Секция: ${section} (Выберите место для отмены)`);
-            for (const row in sections[section]) {
-                const buttons = sections[section][row].map((seat) =>
-                    Markup.button.callback(
-                        `${seat}`,
-                        `cancel_${section}_${row}_${seat}` // Use a different prefix for cancel callbacks
-                    )
-                );
-                await ctx.reply(`Ряд ${row}:`, {
-                    reply_markup: Markup.inlineKeyboard(buttons, { columns: 3 }).reply_markup,
-                });
-            }
-        }
+        const sectionButtons = sections.map((section) =>
+            Markup.button.callback(section.name, `cancel_section_${section.name}`)
+        );
+
+
+        ctx.reply('Выберите секцию для отмены бронирования:', Markup.inlineKeyboard(sectionButtons, { columns: 2 }));
+
 
     } catch (error) {
         console.error('Error fetching bookings for cancellation:', error);
         ctx.reply('Произошла ошибка при получении ваших броней. Попробуйте позже.');
+        if (ctx.session != undefined)
+            delete ctx.session.step;  //Clear session in case of error
     } finally {
         client.release();
     }
 });
 
 
-
-
-// Обработчик выбора места
-bot.on('callback_query', async (ctx) => {
-    const callbackQuery = ctx.callbackQuery;
-    const data = 'data' in callbackQuery ? callbackQuery.data : null;
-    if (data?.startsWith('select_')) {
-        const [, section, row, seat] = data.split('_');
-        const seatInfo = { section, row: parseInt(row), seat: parseInt(seat) };
-
-        ctx.session = ctx.session || { selectedSeats: [] };
-
-        if (!ctx.session.selectedSeats) ctx.session.selectedSeats = [];
-
-        if (
-            ctx.session.selectedSeats.some(
-                (s) => s.section === section && s.row === parseInt(row) && s.seat === parseInt(seat)
-            )
-        ) {
-            ctx.reply(`Место ${seat} в ряду ${row} уже выбрано.`);
-        } else {
-            ctx.session.selectedSeats.push(seatInfo);
-            ctx.reply(`Место ${seat} в ряду ${row} добавлено в вашу бронь.`);
-        }
-
-        await ctx.answerCbQuery();
+async function getCancellableSections(userId: number) {
+    const client = await pool.connect();
+    try {
+        const { rows } = await client.query(
+            `SELECT DISTINCT sections.name
+             FROM seats
+             JOIN rows ON seats.row_id = rows.id
+             JOIN sections ON rows.section_id = sections.id
+             WHERE seats.booked_by = $1`,
+            [userId]
+        );
+        return rows;
+    } finally {
+        client.release();
     }
-    else if (data?.startsWith('cancel_')) {  // Handle cancellation callbacks
-        const [, section, row, seat] = data.split('_');
-        const client = await pool.connect();
+}
 
-        try {
-            const { rowCount } = await client.query(
-                `UPDATE seats SET is_booked = FALSE, booked_by = NULL
-             FROM rows, sections
-             WHERE seats.row_id = rows.id
-             AND rows.section_id = sections.id
-             AND sections.name = $1
-             AND rows.row_number = $2
-             AND seats.seat_number = $3
-             AND seats.booked_by = (SELECT id FROM users WHERE telegram_id = $4);`,
-                [section, row, seat, ctx.from?.id]
-            );
 
-            if (rowCount === 0) {
-                ctx.reply('Место не найдено или не забронировано вами.');
-            } else {
-                ctx.reply('Бронь успешно отменена.');
-            }
-        } catch (error) {
-            console.error('Error cancelling booking:', error);
-            ctx.reply('Произошла ошибка при отмене брони. Попробуйте снова.');
-        } finally {
-            client.release();
-            await ctx.answerCbQuery(); // Answer the callback query
-        }
+async function getCancellableRows(sectionName: string, ctx: TgContext) {
+    const client = await pool.connect();
+    try {
+        const userId = (await client.query(`SELECT id FROM users WHERE telegram_id = $1`, [ctx.from?.id]))?.rows?.[0]?.id;
+        const { rows } = await client.query(
+            `SELECT DISTINCT rows.row_number
+             FROM seats
+             JOIN rows ON seats.row_id = rows.id
+             JOIN sections ON rows.section_id = sections.id
+             WHERE sections.name = $1 AND seats.booked_by = $2`,
+            [sectionName, userId]
+        );
+        return rows;
+    } finally {
+        client.release();
     }
-});
+}
 
+
+async function getCancellableSeats(sectionName: string, rowNumber: number, ctx: TgContext) {
+    const client = await pool.connect();
+    try {
+
+        const userId = (await client.query(`SELECT id FROM users WHERE telegram_id = $1`, [ctx.from?.id]))?.rows?.[0]?.id;
+        const { rows } = await client.query(
+            `SELECT seats.seat_number
+             FROM seats
+             JOIN rows ON seats.row_id = rows.id
+             JOIN sections ON rows.section_id = sections.id
+             WHERE sections.name = $1
+             AND rows.row_number = $2 AND seats.booked_by = $3
+             ORDER BY seats.seat_number;`,
+            [sectionName, rowNumber, userId]
+        );
+        return rows;
+    } finally {
+        client.release();
+    }
+}
 
 
 bot.on('text', async (ctx) => {
@@ -514,12 +657,12 @@ bot.on('text', async (ctx) => {
             ctx.session.fullName = ctx.message.text.trim();
 
             // Валидация ФИО (минимум 2 слова)
-            if (ctx.session.fullName.split(/\s+/).length < 3) {
-                ctx.reply('Пожалуйста, введите полное ФИО (Фамилия, Имя и Отчество).');
+            if (ctx.session.fullName.split(/\s+/).length < 2) {
+                ctx.reply('Пожалуйста, введите Фамилию и Имя целиком');
                 return;
             }
 
-            ctx.reply('Введите ваш номер телефона:');
+            ctx.reply('Введите ваш номер телефона с кодом оператора в формате +375291111111:');
             ctx.session.step = BOOKING_STEPS.AWAITING_PHONE_NUMBER;
         } else if (ctx.session?.step === BOOKING_STEPS.AWAITING_PHONE_NUMBER) {
             const phoneNumber = ctx.message.text.trim();
@@ -572,7 +715,7 @@ bot.on('text', async (ctx) => {
                 );
             }
 
-            ctx.reply('Бронь успешно подтверждена. Спасибо!\nИспользуйте /mybookings для просмотра броней.');
+            ctx.reply('Бронь успешно подтверждена. Спасибо!\nИспользуйте /mybookings для просмотра броней.\nИспользуйте /cancel для отмени брони\nИспользуйте /book для бронирования дополнительных мест');
             ctx.session = {};
         }
         else {
