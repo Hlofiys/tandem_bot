@@ -10,6 +10,8 @@ interface SessionData {
     selectedSection?: string;
     selectedSeat?: number;
     selectedSeats?: { section: string; row: number; seat: number }[];
+    fullName?: string;
+    phoneNumber?: string;
 }
 
 interface TgContext extends Context {
@@ -17,7 +19,7 @@ interface TgContext extends Context {
 }
 
 var token = process.env.BOT_TOKEN;
-if(token == undefined) {
+if (token == undefined) {
     console.error('Token is not defined');
 }
 // Инициализация Telegram Bot API
@@ -80,6 +82,8 @@ const pool = new Pool({
         is_booked BOOLEAN DEFAULT FALSE,
         booked_by INTEGER REFERENCES users(id)
       );
+
+      CREATE INDEX IF NOT EXISTS users_telegram_id ON users (telegram_id);
     `);
     } catch (error) {
         console.error('Error creating tables:', error);
@@ -99,6 +103,8 @@ const BOOKING_STEPS = {
     SELECT_ROW: 'select_row',
     SELECT_SEAT: 'select_seat',
     CONFIRM: 'confirm',
+    AWAITING_FULL_NAME: 'awaiting_full_name',
+    AWAITING_PHONE_NUMBER: 'awaiting_phone_number',
 };
 
 // Обработчик команды /book
@@ -128,13 +134,13 @@ bot.action(/section_(.+)/, async (ctx) => {
 
     const rows = await getRows(sectionName);
     const sectionButtons = rows.map((row) =>
-        Markup.button.callback(`Ряд ${row.row_number}`, `row_${sectionName}_${row.row_number}`)
+        Markup.button.callback(`Ряд ${row.row_number} (${row.free_seats}/${row.total_seats})`, `row_${sectionName}_${row.row_number}`)
     );
     sectionButtons.push(Markup.button.callback('Назад', 'back_to_section'));
     sectionButtons.push(Markup.button.callback('Отмена', 'cancel_booking')); // Add cancel button
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
-    return ctx.editMessageText(`Для подтверждения брони введите /confirm\nВыбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}\nВыберите ряд:`, Markup.inlineKeyboard(sectionButtons, { columns: 3 }));
+    return ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}\nВыберите ряд:`, Markup.inlineKeyboard(sectionButtons, { columns: 3 }));
 });
 
 bot.action(/row_(.+)_(.+)/, async (ctx) => {
@@ -145,15 +151,24 @@ bot.action(/row_(.+)_(.+)/, async (ctx) => {
     }
     ctx.session.selectedRow = parseInt(rowNumber, 10);
     ctx.session.step = BOOKING_STEPS.SELECT_SEAT;
-    const seats = await getSeats(sectionName, parseInt(rowNumber, 10));
-    const rowButtons = seats.map((seat) =>
-        Markup.button.callback(`Место ${seat.seat_number}`, `seat_${sectionName}_${parseInt(rowNumber, 10)}_${seat.seat_number}`)
-    );
+    const seats = await getSeats(sectionName, parseInt(rowNumber, 10), ctx);
+    const rowButtons = seats.map((seat) => { // Use seats with isBookedByUser
+        let label = `Место ${seat.seat_number}`;
+        if (seat.isSelected) {
+            label += " ✅";
+        } else if (seat.isBookedByUser) {
+            label += " 👤";
+        }
+        return Markup.button.callback(label, `seat_${sectionName}_${parseInt(rowNumber, 10)}_${seat.seat_number}`);
+    });
     rowButtons.push(Markup.button.callback('Назад', `back_to_row_${sectionName}`));
     rowButtons.push(Markup.button.callback('Отмена', 'cancel_booking')); // Add cancel button
+    if (ctx.session.selectedSeats != undefined && ctx.session.selectedSeats.length! > 0) {
+        rowButtons.push(Markup.button.callback('Подтвердить', 'confirm_booking'));
+    }
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
-    ctx.editMessageText(`Для подтверждения брони введите /confirm\nВыбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}, Ряд ${rowNumber}\nВыберите место:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+    ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}, Ряд ${rowNumber}\nВыберите место:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
 });
 
 
@@ -169,26 +184,54 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
         seat: parseInt(seatNumber, 10),
     };
 
-    if (ctx.session.selectedSeats.some(s => s.section === seatInfo.section && s.row === seatInfo.row && s.seat === seatInfo.seat)) {
-        // If seat is already selected, inform the user but DON'T add it again
-        ctx.answerCbQuery(`Место ${seatNumber} уже выбрано.`); // Use answerCbQuery for short feedback
-        return; // Stop further processing
+    const existingSeatIndex = ctx.session.selectedSeats.findIndex(
+        (s) => s.section === seatInfo.section && s.row === seatInfo.row && s.seat === seatInfo.seat
+    );
+
+    var seats = await getSeats(sectionName, parseInt(rowNumber, 10), ctx);
+    const selectedSeat = seats.find(seat => seat.seat_number === parseInt(seatNumber)); // Находим selectedSeat
+
+    if (existingSeatIndex > -1) {
+        ctx.session.selectedSeats.splice(existingSeatIndex, 1);
+        ctx.answerCbQuery(`Место ${seatNumber} снято с брони.`);
+    } else if (!selectedSeat?.isBookedByUser) { // Проверка на undefined и isBookedByUser
+        ctx.session.selectedSeats.push(seatInfo);
+        ctx.answerCbQuery(`Место ${seatNumber} добавлено к брони.`);
+    } else {
+        ctx.answerCbQuery('Это место уже забронировано вами.');
+        return;
     }
 
-    ctx.session.selectedSeats.push(seatInfo);
-    const selectedSeatsString = ctx.session.selectedSeats.map(s => `Секция ${s.section}, Ряд ${s.row}, Место ${s.seat}`).join('\n');
+    seats = await getSeats(sectionName, parseInt(rowNumber, 10), ctx);
 
-    const seats = await getSeats(sectionName, parseInt(rowNumber, 10));
-    const seatButtons = seats.map((seat) =>
-        Markup.button.callback(`Место ${seat.seat_number}`, `seat_${sectionName}_${parseInt(rowNumber, 10)}_${seat.seat_number}`)
-    );
+    const seatButtons = seats.map((seat) => {
+        let label = `Место ${seat.seat_number}`;
+        if (seat.isSelected) {
+            label += ' ✅';
+        } else if (seat.isBookedByUser) {
+            label += ' 👤';
+        }
+        return Markup.button.callback(label, `seat_${sectionName}_${parseInt(rowNumber, 10)}_${seat.seat_number}`);
+    });
+
     seatButtons.push(Markup.button.callback('Назад', `back_to_row_${sectionName}`));
-    seatButtons.push(Markup.button.callback('Отмена', `cancel_booking`));
+    seatButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
+    if (ctx.session.selectedSeats.length > 0) {
+        seatButtons.push(Markup.button.callback('Подтвердить', 'confirm_booking'));
+    }
 
-    ctx.editMessageText(`Для подтверждения брони введите /confirm\nВыбранные места:\n${selectedSeatsString}\n\nТеущий выбор:\nСекция ${sectionName}, Ряд ${rowNumber}\nВыберите место:`,
-        Markup.inlineKeyboard(seatButtons, { columns: 3 }));
+    const selectedSeatsString = getSelectedSeatsString(ctx);
 
-    await ctx.answerCbQuery(); // Acknowledge the callback query to prevent "Loading..."
+    try {
+        //  Объединяем обновление текста и кнопок в один вызов editMessageText
+        await ctx.editMessageText(
+            `Выбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nСекция ${sectionName}, Ряд ${rowNumber}\nВыберите место:`,
+            Markup.inlineKeyboard(seatButtons, { columns: 3 })
+        );
+    } catch (error) {
+        console.error("Error updating message:", error);
+        ctx.reply("Произошла ошибка при обновлении сообщения. Попробуйте еще раз.");
+    }
 });
 
 async function getSections() {
@@ -206,7 +249,13 @@ async function getRows(sectionName: string) {
     const client = await pool.connect();
     try {
         const { rows } = await client.query(
-            'SELECT rows.row_number FROM rows JOIN sections ON rows.section_id = sections.id WHERE sections.name = $1',
+            `SELECT rows.row_number, COUNT(seats.id) AS total_seats,
+             (SELECT COUNT(s.id) FROM seats s JOIN rows r ON s.row_id = r.id JOIN sections sec ON r.section_id = sec.id WHERE sec.name = $1 AND r.row_number = rows.row_number AND s.is_booked = FALSE) AS free_seats
+             FROM rows
+             JOIN sections ON rows.section_id = sections.id
+             LEFT JOIN seats ON rows.id = seats.row_id
+             WHERE sections.name = $1
+             GROUP BY rows.row_number`,
             [sectionName]
         );
         return rows;
@@ -216,22 +265,30 @@ async function getRows(sectionName: string) {
 }
 
 
-
-async function getSeats(sectionName: string, rowNumber: number) {
+async function getSeats(sectionName: string, rowNumber: number, ctx: TgContext) {
     const client = await pool.connect();
     try {
         const { rows } = await client.query(
-            `SELECT seats.seat_number
+            `SELECT seats.seat_number, seats.booked_by
              FROM seats
              JOIN rows ON seats.row_id = rows.id
              JOIN sections ON rows.section_id = sections.id
              WHERE sections.name = $1
              AND rows.row_number = $2
-             AND seats.is_booked = FALSE
-             ORDER BY seats.seat_number;`, // Добавляем ORDER BY
+             ORDER BY seats.seat_number;`, // ORDER BY для упорядочивания
             [sectionName, rowNumber]
         );
-        return rows;
+
+        const selectedSeats = ctx.session?.selectedSeats || [];
+        const userId = (await client.query(`SELECT id FROM users WHERE telegram_id = $1`, [ctx.from?.id]))?.rows?.[0]?.id;
+
+        const seatsWithSelection = rows.map(seat => ({
+            ...seat,
+            isSelected: selectedSeats.some(s => s.section === sectionName && s.row === rowNumber && s.seat === seat.seat_number),
+            isBookedByUser: seat.booked_by === userId
+        }));
+
+        return seatsWithSelection;
     } finally {
         client.release();
     }
@@ -240,6 +297,21 @@ async function getSeats(sectionName: string, rowNumber: number) {
 function getSelectedSeatsString(ctx: TgContext) {
     return ctx.session && ctx.session.selectedSeats ? ctx.session.selectedSeats.map(s => `Секция ${s.section}, Ряд ${s.row}, Место ${s.seat}`).join('\n') : "";
 }
+
+// Обработчик кнопок "Подтвердить"
+bot.action('confirm_booking', async (ctx) => {
+    if (!ctx.session?.selectedSeats || ctx.session.selectedSeats.length === 0) {
+        ctx.reply('Вы не выбрали места для бронирования. Введите /book для выбора мест.');
+        return;
+    }
+
+    // Удаляем предыдущее сообщение с кнопками
+    await ctx.deleteMessage();
+
+    ctx.reply('Введите ваше ФИО:');
+    ctx.session.step = BOOKING_STEPS.AWAITING_FULL_NAME;
+});
+
 
 // Обработчики кнопок "Назад"
 bot.action('back_to_section', async (ctx) => {
@@ -258,7 +330,7 @@ bot.action('back_to_section', async (ctx) => {
     );
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
-    return ctx.editMessageText(`Для подтверждения брони введите /confirm\nВыбранные места:\n${selectedSeatsString}\nВыберите секцию:`, Markup.inlineKeyboard(sectionButtons, { columns: 2 }));
+    return ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\nВыберите секцию:`, Markup.inlineKeyboard(sectionButtons, { columns: 2 }));
 
 });
 
@@ -282,24 +354,13 @@ bot.action(/back_to_row_(.+)/, async (ctx) => {
 
     const rows = await getRows(sectionName);
     const rowButtons = rows.map((row) =>
-        Markup.button.callback(`Ряд ${row.row_number}`, `row_${sectionName}_${row.row_number}`)
+        Markup.button.callback(`Ряд ${row.row_number} (${row.free_seats}/${row.total_seats})`, `row_${sectionName}_${row.row_number}`)
     );
     rowButtons.push(Markup.button.callback('Назад', 'back_to_section'));
     rowButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
-    ctx.editMessageText(`Для подтверждения брони введите /confirm\nВыбранные места:\n${selectedSeatsString}\n\nТеущий выбор:\nСекция ${sectionName}\nВыберите ряд:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
-});
-
-// Подтверждение брони
-bot.command('confirm', async (ctx) => {
-    if (!ctx.session?.selectedSeats || ctx.session.selectedSeats.length === 0) {
-        ctx.reply('Вы не выбрали места для бронирования. Введите /book для выбора мест.');
-        return;
-    }
-
-    ctx.reply('Введите ваше ФИО и номер телефона в формате: ФИО, Телефон');
-    ctx.session.step = 'awaiting_user_info';
+    ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТеущий выбор:\nСекция ${sectionName}\nВыберите ряд:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
 });
 
 // Обработчик команды /mybookings
@@ -448,21 +509,33 @@ bot.on('callback_query', async (ctx) => {
 bot.on('text', async (ctx) => {
     const client = await pool.connect();
     try {
-        if (ctx.session?.step === 'awaiting_user_info') {
-            const input = ctx.message.text.trim();
-            const [fullName, phoneNumber] = input.split(',').map((s) => s.trim());
+        if (ctx.session?.step === BOOKING_STEPS.AWAITING_FULL_NAME) {
+            ctx.session.fullName = ctx.message.text.trim();
 
-            if (!fullName || !phoneNumber) {
-                ctx.reply('Некорректный формат. Введите данные в формате: ФИО, Телефон');
+            // Валидация ФИО (минимум 2 слова)
+            if (ctx.session.fullName.split(/\s+/).length < 3) {
+                ctx.reply('Пожалуйста, введите полное ФИО (Фамилия, Имя и Отчество).');
                 return;
             }
+
+            ctx.reply('Введите ваш номер телефона:');
+            ctx.session.step = BOOKING_STEPS.AWAITING_PHONE_NUMBER;
+        } else if (ctx.session?.step === BOOKING_STEPS.AWAITING_PHONE_NUMBER) {
+            const phoneNumber = ctx.message.text.trim();
+            // Валидация номера телефона (простой пример, можно использовать более сложные регулярные выражения)
+            if (!/^\+?\d{12}$/.test(phoneNumber)) {
+                ctx.reply('Пожалуйста, введите корректный номер телефона (например, +375291111111).');
+                return;
+            }
+
+            ctx.session.phoneNumber = phoneNumber;
 
             const { rows: userRows } = await client.query(
                 `INSERT INTO users (full_name, phone_number, telegram_id) 
          VALUES ($1, $2, $3) 
          ON CONFLICT (telegram_id) DO UPDATE SET full_name = EXCLUDED.full_name, phone_number = EXCLUDED.phone_number
          RETURNING id;`,
-                [fullName, phoneNumber, ctx.from?.id]
+                [ctx.session.fullName, ctx.session.phoneNumber, ctx.from?.id]
             );
 
             const userId = userRows[0].id;
