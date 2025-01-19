@@ -255,7 +255,8 @@ async function getRows(sectionName: string) {
              JOIN sections ON rows.section_id = sections.id
              LEFT JOIN seats ON rows.id = seats.row_id
              WHERE sections.name = $1
-             GROUP BY rows.row_number`,
+             GROUP BY rows.row_number
+             ORDER BY rows.row_number ASC`, // Add ORDER BY clause here
             [sectionName]
         );
         return rows;
