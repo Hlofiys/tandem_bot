@@ -355,7 +355,7 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
 
     const color = await checkCellColor(sectionName, parseInt(rowNumber, 10), parseInt(seatNumber, 10));
 
-    if (color === 'red') {
+    if (color === true) {
         ctx.answerCbQuery('Это место уже забронировано');
         return;
     }
@@ -423,7 +423,7 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
     }
 });
 
-async function checkCellColor(section: string, row: number, seat: number): Promise<string | null> {
+async function checkCellColor(section: string, row: number, seat: number): Promise<boolean | null> {
     try {
         await doc.loadInfo();
         const sheet = doc.sheetsByTitle[section];
@@ -431,27 +431,26 @@ async function checkCellColor(section: string, row: number, seat: number): Promi
             return null; // Лист не найден
         }
 
-        await sheet.loadCells('A1:AH30'); // Загружаем ячейки
+        await sheet.loadCells('A1:AH30');
         const colLetter = numToColLetter(seat);
-        const cell = sheet.getCellByA1(`${colLetter}${row}`);
-        var backgroundColor;
-        try {
-            backgroundColor = cell.backgroundColor;
-        }
-        catch {
-            backgroundColor = undefined;
+        const cell = sheet.getCellByA1(`${colLetter}${++row}`);
+
+        // Читаем значение ячейки как boolean
+        const isBooked = cell.value;
+
+         // Проверяем тип значения и возвращаем boolean или null
+        if (typeof isBooked === 'boolean') {
+            return isBooked;
+        } else if (isBooked === "TRUE" || isBooked === "FALSE"){
+            return isBooked === "TRUE";
+        } else {
+            return null; // Значение не boolean
         }
 
-        if (backgroundColor && backgroundColor.red === 1) {
-            return 'red'; // Ячейка красная (забронирована)
-        } else if (backgroundColor && backgroundColor.green === 1) {
-            return 'green';
-        }
-        else {
-            return null; // Ячейка не красная
-        }
+
+
     } catch (error) {
-        console.error('Ошибка при проверке цвета ячейки:', error);
+        console.error('Ошибка при проверке значения ячейки:', error);
         return null;
     }
 }
@@ -461,20 +460,19 @@ async function updateSheet(section: string, row: number, seat: number, isBooking
         await doc.loadInfo();
 
         let sheet: GoogleSpreadsheetWorksheet | null = null;
-        const sheetName = section; // Используем название секции как название листа
+        const sheetName = section;
 
-        // Ищем существующий лист или создаем новый
         sheet = doc.sheetsByTitle[sheetName];
         if (!sheet) {
             sheet = await doc.addSheet({ title: sheetName });
         }
 
-        await sheet.loadCells('A1:AH30'); // Загружаем достаточно ячеек (подберите диапазон)
+        await sheet.loadCells('A1:AH30');
         const colLetter = numToColLetter(seat);
-        const cell = sheet.getCellByA1(`${colLetter}${row}`);
+        const cell = sheet.getCellByA1(`${colLetter}${++row}`);
 
-
-        cell.backgroundColor = isBooking ? { red: 1, green: 0, blue: 0 } : { red: 0, green: 1, blue: 0 };
+        // Вместо цвета записываем true/false
+        cell.value = isBooking; 
         await sheet.saveUpdatedCells();
 
     } catch (error) {
@@ -869,7 +867,7 @@ async function checkSpreadsheetChanges() {
                 if (!sheet) continue; // Пропускаем, если лист (секция) не найден
 
                 const colLetter = numToColLetter(dbSeat.seat_number);
-                const cell = sheet.getCellByA1(`${colLetter}${dbSeat.row_number}`);
+                const cell = sheet.getCellByA1(`${colLetter}${++dbSeat.row_number}`);
                 var backgroundColor;
                 try {
                     backgroundColor = cell.backgroundColor;
