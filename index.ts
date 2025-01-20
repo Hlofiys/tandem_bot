@@ -966,6 +966,84 @@ function numToColLetter(num: number) {
 // Запускаем проверку изменений каждую минуту
 setInterval(checkSpreadsheetChanges, 60 * 1000);
 
+async function fetchDataAndWriteToSheet() {
+    const client = await pool.connect();
+    try {
+        const { rows: data } = await client.query(`
+            SELECT
+                u.full_name as ФИО,
+                u.phone_number as Телефон,
+                json_agg(json_build_object(
+                    'Секция', s.name,
+                    'Ряд', r.row_number,
+                    'Место', st.seat_number
+                )) AS Места
+            FROM
+                users u
+            LEFT JOIN
+                seats st ON u.id = st.booked_by
+            LEFT JOIN
+                rows r ON st.row_id = r.id
+            LEFT JOIN
+                sections s ON r.section_id = s.id
+            GROUP BY
+                u.id, u.full_name, u.phone_number
+            ORDER BY u.id;
+        `);
+
+        await writeToGoogleSheet(data);
+
+    } catch (error) {
+        console.error('Error fetching data or writing to sheet:', error);
+    } finally {
+        client.release();
+    }
+}
+
+async function writeToGoogleSheet(data: any[]) {
+    try {
+        await doc.loadInfo();
+        const sheet = await ensureSheetExists('Брони'); // Create or get the 'Bookings' sheet
+
+        // Clear existing data (optional, if you want to overwrite every minute)
+        await sheet.clear();
+
+        // Add header row
+        await sheet.setHeaderRow(['ФИО', 'Телефон', 'Места']);
+
+        // Add data rows
+        const rows = data.map(item => {
+            const местаString = item.Места.map((место: any) => `${место.Секция}, ряд ${место.Ряд}, место ${место.Место}`).join('; ');
+            return [item.ФИО, item.Телефон, местаString];
+        });
+        await sheet.addRows(rows);
+
+
+    } catch (error) {
+        console.error('Error writing to Google Sheet:', error);
+    }
+}
+
+
+async function ensureSheetExists(title: string): Promise<GoogleSpreadsheetWorksheet> {
+    try {
+
+        let sheet = doc.sheetsByTitle[title];
+        if (!sheet) {
+            sheet = await doc.addSheet({ title });
+        }
+        return sheet;
+    } catch (error) {
+        console.error('Error creating sheet');
+        throw error;
+    }
+}
+
+
+
+// Schedule the function to run every minute
+setInterval(fetchDataAndWriteToSheet, 60 * 1000);
+
 // Запуск бота
 bot.launch();
 
