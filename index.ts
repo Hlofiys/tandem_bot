@@ -438,10 +438,10 @@ async function checkCellColor(section: string, row: number, seat: number): Promi
         // Читаем значение ячейки как boolean
         const isBooked = cell.value;
 
-         // Проверяем тип значения и возвращаем boolean или null
+        // Проверяем тип значения и возвращаем boolean или null
         if (typeof isBooked === 'boolean') {
             return isBooked;
-        } else if (isBooked === "TRUE" || isBooked === "FALSE"){
+        } else if (isBooked === "TRUE" || isBooked === "FALSE") {
             return isBooked === "TRUE";
         } else {
             return null; // Значение не boolean
@@ -472,7 +472,7 @@ async function updateSheet(section: string, row: number, seat: number, isBooking
         const cell = sheet.getCellByA1(`${colLetter}${++row}`);
 
         // Вместо цвета записываем true/false
-        cell.value = isBooking; 
+        cell.value = isBooking;
         await sheet.saveUpdatedCells();
 
     } catch (error) {
@@ -830,18 +830,16 @@ async function checkSpreadsheetChanges() {
         const client = await pool.connect();
 
         try {
-            // Получаем все секции из базы данных (для загрузки листов)
             const { rows: dbSections } = await client.query(`SELECT DISTINCT name FROM sections`);
             const sectionNames = dbSections.map(section => section.name);
 
-            // Загружаем все листы (секции) один раз
             const sheets = await Promise.all(sectionNames.map(async sectionName => {
                 const sheet = doc.sheetsByTitle[sectionName];
                 if (sheet) {
                     await sheet.loadCells('A1:AH30');
                     return sheet;
                 }
-                return null; // Возвращаем null, если лист не найден
+                return null;
             }));
 
             const sheetsBySectionName = sectionNames.reduce((acc, sectionName, index) => {
@@ -852,7 +850,6 @@ async function checkSpreadsheetChanges() {
                 return acc;
             }, {});
 
-            // Получаем все секции, ряды и места из базы данных
             const { rows: dbSeats } = await client.query(
                 `SELECT sections.name AS section_name, rows.row_number, seats.seat_number
                  FROM seats
@@ -860,29 +857,43 @@ async function checkSpreadsheetChanges() {
                  JOIN sections ON rows.section_id = sections.id`
             );
 
-            // Перебираем места из базы данных
             for (const dbSeat of dbSeats) {
                 const sheet = sheetsBySectionName[dbSeat.section_name];
-
-                if (!sheet) continue; // Пропускаем, если лист (секция) не найден
+                if (!sheet) continue;
 
                 const colLetter = numToColLetter(dbSeat.seat_number);
                 const cell = sheet.getCellByA1(`${colLetter}${++dbSeat.row_number}`);
-                var backgroundColor;
-                try {
-                    backgroundColor = cell.backgroundColor;
-                }
-                catch {
-                    backgroundColor = undefined;
+
+
+                // Directly get the boolean value
+                const isBookedInSpreadsheet = cell.value;
+
+                // Handle cases where the value is not a boolean
+                let isBookedBool = null;
+                if (typeof isBookedInSpreadsheet === 'boolean') {
+                    isBookedBool = isBookedInSpreadsheet;
+                } else if (isBookedInSpreadsheet === "TRUE" || isBookedInSpreadsheet === "FALSE") {
+                    isBookedBool = isBookedInSpreadsheet === "TRUE";
                 }
 
-                if (backgroundColor) {
-                    if (backgroundColor.red === 1 && backgroundColor.green !== 1) {
+                if (isBookedBool !== null) { // Proceed only if we have a valid boolean value
+                    const { rows: dbSeatInfo } = await client.query(
+                        `SELECT is_booked FROM seats
+                         JOIN rows ON seats.row_id = rows.id
+                         JOIN sections ON rows.section_id = sections.id
+                         WHERE sections.name = $1 AND rows.row_number = $2 AND seats.seat_number = $3`,
+                        [dbSeat.section_name, dbSeat.row_number, dbSeat.seat_number]
+                    );
+                    const isBookedInDb = dbSeatInfo[0]?.is_booked;
+
+
+                    if (isBookedBool && !isBookedInDb) {
                         await handleRedCell(dbSeat.section_name, dbSeat.row_number, dbSeat.seat_number, client);
-                    } else if (backgroundColor.green === 1 && backgroundColor.red !== 1) {
+                    } else if (!isBookedBool && isBookedInDb) {
                         await handleGreenCell(dbSeat.section_name, dbSeat.row_number, dbSeat.seat_number, client);
                     }
                 }
+
             }
         } finally {
             client.release();
