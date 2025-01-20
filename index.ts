@@ -433,7 +433,7 @@ async function checkCellColor(section: string, row: number, seat: number): Promi
 
         await sheet.loadCells('A1:AH30');
         const colLetter = numToColLetter(seat);
-        const cell = sheet.getCellByA1(`${colLetter}${++row}`);
+        const cell = sheet.getCellByA1(`${colLetter}${row}`);
 
         // Читаем значение ячейки как boolean
         const isBooked = cell.value;
@@ -469,7 +469,7 @@ async function updateSheet(section: string, row: number, seat: number, isBooking
 
         await sheet.loadCells('A1:AH30');
         const colLetter = numToColLetter(seat);
-        const cell = sheet.getCellByA1(`${colLetter}${++row}`);
+        const cell = sheet.getCellByA1(`${colLetter}$row}`);
 
         // Вместо цвета записываем true/false
         cell.value = isBooking;
@@ -862,7 +862,7 @@ async function checkSpreadsheetChanges() {
                 if (!sheet) continue;
 
                 const colLetter = numToColLetter(dbSeat.seat_number);
-                const cell = sheet.getCellByA1(`${colLetter}${++dbSeat.row_number}`);
+                const cell = sheet.getCellByA1(`${colLetter}${dbSeat.row_number}`);
 
 
                 // Directly get the boolean value
