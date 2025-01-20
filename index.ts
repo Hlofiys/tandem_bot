@@ -469,7 +469,7 @@ async function updateSheet(section: string, row: number, seat: number, isBooking
 
         await sheet.loadCells('A1:AH30');
         const colLetter = numToColLetter(seat);
-        const cell = sheet.getCellByA1(`${colLetter}$row}`);
+        const cell = sheet.getCellByA1(`${colLetter}${row}`);
 
         // Вместо цвета записываем true/false
         cell.value = isBooking;
