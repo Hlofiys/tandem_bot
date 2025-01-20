@@ -1003,21 +1003,38 @@ async function fetchDataAndWriteToSheet() {
 async function writeToGoogleSheet(data: any[]) {
     try {
         await doc.loadInfo();
-        const sheet = await ensureSheetExists('Брони'); // Create or get the 'Bookings' sheet
+        const sheet = await ensureSheetExists('Брони');
+        await sheet.loadCells();
 
-        // Clear existing data (optional, if you want to overwrite every minute)
-        await sheet.clear();
 
-        // Add header row
-        await sheet.setHeaderRow(['ФИО', 'Телефон', 'Места']);
+        let lastDataRow = 1;
+        while (sheet.getCell(lastDataRow, 0).value) {
+            lastDataRow++;
+        }
 
-        // Add data rows
+        // Correct way to clear a range of cells
+        for (let row = 1; row < lastDataRow; row++) {
+            for (let col = 0; col < 5; col++) {  // Clear up to 5 columns (0-indexed)
+                sheet.getCell(row, col).value = '';
+            }
+        }
+
+       await sheet.saveUpdatedCells(); // Important: Save the changes after clearing
+
+
+        // Set header row
+        if (!sheet.getCell(0, 0).value) {
+            await sheet.setHeaderRow(['ФИО', 'Телефон', 'Секции', 'Ряды', 'Места']);
+        }
+
         const rows = data.map(item => {
-            const местаString = item.Места.map((место: any) => `${место.Секция}, ряд ${место.Ряд}, место ${место.Место}`).join('; ');
-            return [item.ФИО, item.Телефон, местаString];
+            const секции = item.Места.map((место: any) => место.Секция).join(', ');
+            const ряды = item.Места.map((место: any) => место.Ряд).join(', ');
+            const места = item.Места.map((место: any) => место.Место).join(', ');
+            return [item.ФИО, item.Телефон, секции, ряды, места];
         });
-        await sheet.addRows(rows);
 
+        await sheet.addRows(rows);
 
     } catch (error) {
         console.error('Error writing to Google Sheet:', error);
