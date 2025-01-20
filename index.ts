@@ -1012,13 +1012,10 @@ async function writeToGoogleSheet(data: any[]) {
             lastDataRow++;
         }
 
-        await sheet.clear(`A1:E${lastDataRow}`)
+        await sheet.clear(`A2:E${lastDataRow}`);
 
 
-        // Set header row
-        if (!sheet.getCell(0, 0).value) {
-            await sheet.setHeaderRow(['ФИО', 'Телефон', 'Секции', 'Ряды', 'Места']);
-        }
+        await sheet.setHeaderRow(['ФИО', 'Телефон', 'Секции', 'Ряды', 'Места']);
 
         const rows = data.map(item => {
             const секции = item.Места.map((место: any) => место.Секция).join(', ');
