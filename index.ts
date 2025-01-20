@@ -1004,7 +1004,7 @@ async function writeToGoogleSheet(data: any[]) {
     try {
         await doc.loadInfo();
         const sheet = await ensureSheetExists('Брони');
-        await sheet.loadCells();
+        await sheet.loadCells(`A1:E${data.length}`);
 
 
         let lastDataRow = 1;
