@@ -1012,14 +1012,7 @@ async function writeToGoogleSheet(data: any[]) {
             lastDataRow++;
         }
 
-        // Correct way to clear a range of cells
-        for (let row = 1; row < lastDataRow; row++) {
-            for (let col = 0; col < 5; col++) {  // Clear up to 5 columns (0-indexed)
-                sheet.getCell(row, col).value = '';
-            }
-        }
-
-       await sheet.saveUpdatedCells(); // Important: Save the changes after clearing
+        await sheet.clear(`A1:E${lastDataRow}`)
 
 
         // Set header row
