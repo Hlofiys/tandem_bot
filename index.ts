@@ -19,8 +19,8 @@ interface SessionData {
 interface TgContext extends Context {
     session?: SessionData;
 }
-
-var token = process.env.BOT_TOKEN;
+const MAX_SEATS_PER_USER = 4;
+const token = process.env.BOT_TOKEN;
 if (token == undefined) {
     console.error('Token is not defined');
 }
@@ -363,6 +363,34 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
         ctx.session.selectedSeats.splice(existingSeatIndex, 1);
         ctx.answerCbQuery(`Место ${seatNumber} снято с брони.`);
     } else if (!selectedSeat?.isBookedByUser && !selectedSeat?.isBooked) { // Проверка на undefined и isBookedByUser
+        // Check if adding this seat exceeds the limit
+        if (ctx.session.selectedSeats.length >= MAX_SEATS_PER_USER) {
+            ctx.answerCbQuery(`Вы можете забронировать максимум ${MAX_SEATS_PER_USER} места.`);
+            return;
+        }
+
+
+        const client = await pool.connect();
+
+        try {
+            const userBookings = await client.query(
+                `SELECT COUNT(*) FROM seats WHERE booked_by = (SELECT id FROM users WHERE telegram_id = $1)`,
+                [ctx.from.id]
+            )
+
+
+            if (parseInt(userBookings.rows[0].count) + ctx.session.selectedSeats.length >= MAX_SEATS_PER_USER) {
+                ctx.answerCbQuery(`Вы можете забронировать максимум ${MAX_SEATS_PER_USER} места.`);
+                return;
+            }
+
+
+        } catch (error) {
+            console.log("Failed to get user bookings")
+        } finally {
+            client.release();
+        }
+
         ctx.session.selectedSeats.push(seatInfo);
         ctx.answerCbQuery(`Место ${seatNumber} добавлено к брони.`);
     } else if (selectedSeat?.isBookedByUser) {
@@ -1121,12 +1149,10 @@ async function writeToGoogleSheet(data: any[]) {
         await sheet.loadCells();
 
 
-        let lastDataRow = 1;
-        while (sheet.getCell(lastDataRow, 0).value) {
-            lastDataRow++;
-        }
+        const lastRow = sheet.rowCount; //Get the last row containing data
 
-        await sheet.clear(`A2:E${lastDataRow}`);
+
+        await sheet.clear(`A2:E${lastRow}`); // Clear all existing data EXCEPT the header row
 
 
         await sheet.setHeaderRow(['ФИО', 'Телефон', 'Секции', 'Ряды', 'Места', 'Оплата']);
@@ -1147,7 +1173,8 @@ async function writeToGoogleSheet(data: any[]) {
             previousPhone = item.Телефон;
         }
 
-        await sheet.addRows(rowsToAdd);
+        if (rowsToAdd.length > 0)
+            await sheet.addRows(rowsToAdd); //Add rows only if rowsToAdd isn't empty
 
     } catch (error) {
         console.error('Error writing to Google Sheet:', error);
@@ -1172,7 +1199,7 @@ async function ensureSheetExists(title: string): Promise<GoogleSpreadsheetWorksh
 
 
 // Schedule the function to run every minute
-setInterval(fetchDataAndWriteToSheet, 60 * 100);
+setInterval(fetchDataAndWriteToSheet, 60 * 1000);
 
 // Запуск бота
 bot.launch();
