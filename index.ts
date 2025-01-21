@@ -1090,7 +1090,7 @@ async function fetchDataAndWriteToSheet() {
                 u.phone_number as "Телефон",
                 s.name as "Секция",
                 r.row_number as "Ряд",
-                json_agg(st.seat_number) AS "Место"
+                json_agg(st.seat_number ORDER BY st.seat_number) AS "Место"
             FROM
                 users u
             LEFT JOIN
@@ -1140,8 +1140,9 @@ async function writeToGoogleSheet(data: any[]) {
             const fioToAdd = item.ФИО !== previousFio ? item.ФИО : null;
             const phoneToAdd = item.Телефон !== previousPhone ? item.Телефон : null;
 
+            const seatsArray = Array.isArray(item.Место) ? item.Место : [item.Место];
 
-            rowsToAdd.push([fioToAdd, phoneToAdd, item.Секция, item.Ряд, item.Место.join(', ')]);
+            rowsToAdd.push([fioToAdd, phoneToAdd, item.Секция, `'` + item.Ряд.toString(), `'` + seatsArray.join(', ')]);
             previousFio = item.ФИО;
             previousPhone = item.Телефон;
         }
@@ -1171,7 +1172,7 @@ async function ensureSheetExists(title: string): Promise<GoogleSpreadsheetWorksh
 
 
 // Schedule the function to run every minute
-setInterval(fetchDataAndWriteToSheet, 60 * 1000);
+setInterval(fetchDataAndWriteToSheet, 60 * 100);
 
 // Запуск бота
 bot.launch();
