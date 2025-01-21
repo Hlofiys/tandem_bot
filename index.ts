@@ -124,8 +124,7 @@ const BOOKING_STEPS = {
     AWAITING_PHONE_NUMBER: 'awaiting_phone_number',
 };
 
-// Обработчик команды /book
-bot.command('book', async (ctx) => {
+async function startBooking(ctx: TgContext) {
     ctx.session = { selectedSeats: [], step: BOOKING_STEPS.SELECT_SECTION };
     const sections = await getSections();
 
@@ -138,7 +137,10 @@ bot.command('book', async (ctx) => {
     );
 
     return ctx.reply('Выберите секцию:', Markup.inlineKeyboard(sectionButtons, { columns: 2 }));
-});
+}
+
+// Обработчик команды /book
+bot.command('book', startBooking);
 
 
 bot.action(/^cancel_section_(.+)/, async (ctx) => {
@@ -246,36 +248,27 @@ bot.action('confirm_cancellation', async (ctx) => {
     try {
         const userId = (await client.query(`SELECT id FROM users WHERE telegram_id = $1`, [ctx.from?.id]))?.rows?.[0]?.id;
 
-
-        for (const seat of ctx.session.selectedSeats) {
-            const { rowCount } = await client.query(
-                `UPDATE seats SET is_booked = FALSE, booked_by = NULL
-                 WHERE row_id = (SELECT id FROM rows WHERE section_id = (SELECT id FROM sections WHERE name = $1) AND row_number = $2)
-                 AND seat_number = $3 AND booked_by = $4;`,
-                [seat.section, seat.row, seat.seat, userId]
-            );
-
-            if (rowCount !== 1) {
-                // Handle cases where a seat couldn't be cancelled (e.g., already cancelled by someone else)
-                ctx.reply(`Место ${seat.seat} в секции ${seat.section}, ряд ${seat.row} не найдено или не забронировано вами.`);
-                return; // Stop the loop and the cancellation process
-            }
-
-            await updateSheet(seat.section, seat.row, seat.seat, false); // false для отмены
+        if (!userId) {
+            ctx.reply('У вас нет активных броней.');
+            return;
         }
 
-
-        ctx.reply(`${ctx.session.selectedSeats.length} мест(а) успешно отменено.`);
-        ctx.session.step = undefined; // Clear the session after cancellation
-        ctx.session.selectedSeats = []; // Clear selected seats
+        try {
+            await updateSeatsAndSheet(ctx.session.selectedSeats, userId, false, ctx);
+            ctx.reply(`${ctx.session.selectedSeats.length} мест(а) успешно отменено.`);
+            ctx.session.step = undefined; // Clear the session after cancellation
+            ctx.session.selectedSeats = []; // Clear selected seats
+        } catch (error) {
+            // Error is already handled in updateSeatsAndSheet
+        }
 
     } catch (error) {
-        console.error('Error during seat cancellation:', error);
-        ctx.reply('Произошла ошибка при отмене бронирования.');
+        console.error('Error during initial phase of seat cancellation (fetching userId):', error);
+        ctx.reply('Произошла ошибка при отмене бронирования. Пожалуйста, попробуйте снова.');
+
     } finally {
         client.release();
         await ctx.answerCbQuery();
-
     }
 });
 
@@ -353,13 +346,6 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
         return ctx.reply('Введите /book для начала бронирования.');
     }
 
-    const color = await checkCellColor(sectionName, parseInt(rowNumber, 10), parseInt(seatNumber, 10));
-
-    if (color === true) {
-        ctx.answerCbQuery('Это место уже забронировано');
-        return;
-    }
-
     const seatInfo = {
         section: sectionName,
         row: parseInt(rowNumber, 10),
@@ -423,60 +409,133 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
     }
 });
 
-async function checkCellColor(section: string, row: number, seat: number): Promise<boolean | null> {
+async function checkCellColorBulk(seats: { section: string; row: number; seat: number }[]): Promise<{ [key: string]: boolean | null }> {
     try {
-        await doc.loadInfo();
-        const sheet = doc.sheetsByTitle[section];
-        if (!sheet) {
-            return null; // Лист не найден
+        await doc.loadInfo(); // Load sheet info once outside the loop
+        const results: { [key: string]: boolean | null } = {};
+
+        const sheetsToLoad: { [section: string]: boolean } = {}; // Track which sheets need loading
+
+        for (const seat of seats) {
+            if (!sheetsToLoad[seat.section]) {
+                sheetsToLoad[seat.section] = true;
+            }
         }
 
-        await sheet.loadCells('A1:AH30');
-        const colLetter = numToColLetter(seat);
-        const cell = sheet.getCellByA1(`${colLetter}${row}`);
+        const sheetPromises = Object.keys(sheetsToLoad).map(async sectionName => {
+            const sheet = doc.sheetsByTitle[sectionName];
+            if (sheet) {
+                await sheet.loadCells('A1:AH30');
+                return { sectionName, sheet };
+            }
+            return null;
+        });
 
-        // Читаем значение ячейки как boolean
-        const isBooked = cell.value;
+        const loadedSheets = await Promise.all(sheetPromises);
 
-        // Проверяем тип значения и возвращаем boolean или null
-        if (typeof isBooked === 'boolean') {
-            return isBooked;
-        } else if (isBooked === "TRUE" || isBooked === "FALSE") {
-            return isBooked === "TRUE";
-        } else {
-            return null; // Значение не boolean
+        const sheetsBySection: { [sectionName: string]: GoogleSpreadsheetWorksheet } = {};
+        for (const loadedSheet of loadedSheets) {
+            if (loadedSheet) {
+                sheetsBySection[loadedSheet.sectionName] = loadedSheet.sheet;
+            }
         }
 
 
+        for (const seat of seats) {
+            const sheet = sheetsBySection[seat.section];
 
+            if (!sheet) {
+                results[`${seat.section}-${seat.row}-${seat.seat}`] = null; // Sheet not found or error
+                continue;
+            }
+
+            const colLetter = numToColLetter(seat.seat);
+            const cell = sheet.getCellByA1(`${colLetter}${seat.row}`);
+            const isBooked = cell.value;
+
+            if (typeof isBooked === 'boolean') {
+                results[`${seat.section}-${seat.row}-${seat.seat}`] = isBooked;
+            } else if (isBooked === "TRUE" || isBooked === "FALSE") {
+                results[`${seat.section}-${seat.row}-${seat.seat}`] = isBooked === "TRUE";
+            } else {
+                results[`${seat.section}-${seat.row}-${seat.seat}`] = null; // Unexpected value, handle as needed
+            }
+        }
+
+        return results;
     } catch (error) {
-        console.error('Ошибка при проверке значения ячейки:', error);
-        return null;
+        console.error('Error checking cell colors in bulk:', error);
+        // Handle the error as needed, perhaps returning an empty object or throwing the error
+        return {}; // Or throw error
     }
 }
 
-async function updateSheet(section: string, row: number, seat: number, isBooking: boolean) {
+async function updateSeatsAndSheet(seats: { section: string; row: number; seat: number }[], userId: number, isBooking: boolean, ctx: TgContext) {
     try {
-        await doc.loadInfo();
+        await doc.loadInfo(); // Load sheet info once outside the loop
 
-        let sheet: GoogleSpreadsheetWorksheet | null = null;
-        const sheetName = section;
+        const client = await pool.connect();
+        try {
+            await client.query('BEGIN'); // Start transaction
 
-        sheet = doc.sheetsByTitle[sheetName];
-        if (!sheet) {
-            sheet = await doc.addSheet({ title: sheetName });
+            const sheetsToUpdate: { [section: string]: GoogleSpreadsheetWorksheet } = {};
+
+            for (const seat of seats) {
+                // Update database
+                const query = `
+                    UPDATE seats 
+                    SET is_booked = $1, booked_by = $2
+                    WHERE row_id = (SELECT id FROM rows WHERE section_id = (SELECT id FROM sections WHERE name = $3) AND row_number = $4)
+                    AND seat_number = $5
+                    RETURNING *;  -- Return updated rows for verification
+                `;
+
+                const values = [isBooking, isBooking ? userId : null, seat.section, seat.row, seat.seat];
+                const { rowCount, rows: updatedRows } = await client.query(query, values);
+
+                if (rowCount !== 1) {
+                    throw new Error(`Failed to update seat: ${seat.section}, ${seat.row}, ${seat.seat}. Row count: ${rowCount}`);
+                }
+
+
+                let sheet = sheetsToUpdate[seat.section]; //Check if sheet is already loaded
+
+                if (!sheet) {   //Load sheet only if it's not already loaded
+                    sheet = doc.sheetsByTitle[seat.section];
+                    if (!sheet) {
+                        sheet = await doc.addSheet({ title: seat.section });
+                    }
+
+                    await sheet.loadCells('A1:AH30'); //Load cells for the section
+                    sheetsToUpdate[seat.section] = sheet; //Store loaded sheet for reuse
+                }
+
+                const colLetter = numToColLetter(seat.seat);
+                const cell = sheet.getCellByA1(`${colLetter}${seat.row}`);
+                cell.value = isBooking;
+
+            }
+
+
+            const updatePromises = Object.values(sheetsToUpdate).map(sheet => sheet.saveUpdatedCells()); // Update all modified sheets
+            await Promise.all(updatePromises);
+
+            await client.query('COMMIT'); // Commit transaction
+
+        } catch (error) {
+            await client.query('ROLLBACK'); // Rollback transaction on error
+            console.error('Error updating seats:', error);
+            ctx.reply('Произошла ошибка при обновлении. Попробуйте снова.');
+
+            throw error; // Re-throw the error to be handled by the calling function
+        } finally {
+            client.release();
         }
 
-        await sheet.loadCells('A1:AH30');
-        const colLetter = numToColLetter(seat);
-        const cell = sheet.getCellByA1(`${colLetter}${row}`);
+    } catch (sheetError) {
+        console.error('Error loading sheet info:', sheetError);
+        ctx.reply('Произошла ошибка. Попробуйте снова.');
 
-        // Вместо цвета записываем true/false
-        cell.value = isBooking;
-        await sheet.saveUpdatedCells();
-
-    } catch (error) {
-        console.error('Ошибка при обновлении Google Sheets:', error);
     }
 }
 
@@ -549,15 +608,70 @@ function getSelectedSeatsString(ctx: TgContext) {
 // Обработчик кнопок "Подтвердить"
 bot.action('confirm_booking', async (ctx) => {
     if (!ctx.session?.selectedSeats || ctx.session.selectedSeats.length === 0) {
-        ctx.reply('Вы не выбрали места для бронирования. Введите /book для выбора мест.');
-        return;
+        return ctx.reply('Вы не выбрали места для бронирования. Введите /book для выбора мест.');
     }
 
-    // Удаляем предыдущее сообщение с кнопками
-    await ctx.deleteMessage();
+    await ctx.deleteMessage(); // Delete the seats selection message
 
-    ctx.reply('Введите ваше ФИО:');
-    ctx.session.step = BOOKING_STEPS.AWAITING_FULL_NAME;
+    const bookedSeats: { section: string; row: number; seat: number }[] = [];
+    const successfullySelectedSeats: { section: string; row: number; seat: number }[] = [];
+
+    const availability = await checkCellColorBulk(ctx.session.selectedSeats || []);
+
+    for (const seat of ctx.session.selectedSeats || []) {
+        const key = `${seat.section}-${seat.row}-${seat.seat}`;
+        const isBooked = availability[key];
+
+        if (isBooked === true || isBooked === null) {
+            bookedSeats.push(seat);
+        } else {
+            successfullySelectedSeats.push(seat)
+        }
+    }
+
+    if (bookedSeats.length > 0) {
+        await checkSpreadsheetChanges();
+        const bookedSeatsString = bookedSeats.map(s => `Секция ${s.section}, Ряд ${s.row}, Место ${s.seat}`).join('\n');
+        //Alert user about already booked seats using a single message with an edit
+        if (successfullySelectedSeats.length === 0) { //if all the selected seats were already booked
+            ctx.reply(`⚠️Следующие места уже забронированы:\n${bookedSeatsString}\nПожалуйста, выберите другие места.`);
+            ctx.session.selectedSeats = [];
+            ctx.session.step = BOOKING_STEPS.SELECT_SECTION;
+            return startBooking(ctx); // Call the startBooking function
+        }
+        else { //if some of the seats are already booked, show the list of available seats in the selection
+            ctx.session.selectedSeats = successfullySelectedSeats;
+            const lastSelectedSeat = ctx.session.selectedSeats[ctx.session.selectedSeats.length - 1];
+
+            const seats = await getSeats(lastSelectedSeat.section, lastSelectedSeat.row, ctx);
+            const seatButtons = seats.map(seat => {
+                let label = `Место ${seat.seat_number}`;
+                if (seat.isSelected) {
+                    label += " ✅";
+                } else if (seat.isBookedByUser) {
+                    label += " 👤";
+                } else if (seat.isBooked) {
+                    label += " ❌";
+                }
+                return Markup.button.callback(label, `seat_${lastSelectedSeat.section}_${lastSelectedSeat.row}_${seat.seat_number}`)
+            });
+
+            seatButtons.push(Markup.button.callback('Назад', `back_to_row_${lastSelectedSeat.section}`));
+            if (ctx.session.selectedSeats.length > 0) {
+                seatButtons.push(Markup.button.callback('Подтвердить', 'confirm_booking'));
+            }
+
+            const selectedSeatsString = getSelectedSeatsString(ctx);
+
+            return ctx.reply(`⚠️Некоторые из выбранных вами мест были уже забронированы:\n${bookedSeatsString}\n\nПожалуйста, выберите другие места.\n\nВыбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nСекция ${lastSelectedSeat.section}, Ряд ${lastSelectedSeat.row}\nВыберите место:`,
+                Markup.inlineKeyboard(seatButtons, { columns: 3 }));
+        }
+
+
+    } else { //  Proceed to get user details if no seats are booked
+        ctx.reply('Введите ваше ФИО:');
+        ctx.session.step = BOOKING_STEPS.AWAITING_FULL_NAME;
+    }
 });
 
 
@@ -795,23 +909,13 @@ bot.on('text', async (ctx) => {
                 }
             }
 
-            for (const seat of ctx.session.selectedSeats || []) {
-                await client.query(
-                    `UPDATE seats SET is_booked = TRUE, booked_by = $1
-           FROM rows, sections
-           WHERE seats.row_id = rows.id
-           AND rows.section_id = sections.id
-           AND sections.name = $2
-           AND rows.row_number = $3
-           AND seats.seat_number = $4;`,
-                    [userId, seat.section, seat.row, seat.seat]
-                );
-
-                await updateSheet(seat.section, seat.row, seat.seat, true); // true для бронирования
+            try {
+                await updateSeatsAndSheet(ctx.session.selectedSeats || [], userId, true, ctx);
+                ctx.reply('Бронь успешно подтверждена. Спасибо!\nИспользуйте /mybookings для просмотра броней.\nИспользуйте /cancel для отмени брони\nИспользуйте /book для бронирования дополнительных мест');
+                ctx.session = {};
+            } catch (error) {
+                // Error is already handled in updateSeatsAndSheet
             }
-
-            ctx.reply('Бронь успешно подтверждена. Спасибо!\nИспользуйте /mybookings для просмотра броней.\nИспользуйте /cancel для отмени брони\nИспользуйте /book для бронирования дополнительных мест');
-            ctx.session = {};
         }
         else {
             ctx.reply('Используйте команду /book для начала бронирования или /mybookings для просмотра броней.');
@@ -1015,7 +1119,7 @@ async function writeToGoogleSheet(data: any[]) {
         await sheet.clear(`A2:E${lastDataRow}`);
 
 
-        await sheet.setHeaderRow(['ФИО', 'Телефон', 'Секции', 'Ряды', 'Места']);
+        await sheet.setHeaderRow(['ФИО', 'Телефон', 'Секции', 'Ряды', 'Места', 'Оплата']);
 
         const rows = data.map(item => {
             const секции = item.Места.map((место: any) => место.Секция).join(', ');
