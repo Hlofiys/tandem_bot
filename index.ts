@@ -669,7 +669,7 @@ bot.action('confirm_booking', async (ctx) => {
 
 
     } else { //  Proceed to get user details if no seats are booked
-        ctx.reply('Введите ваше ФИО:');
+        ctx.reply('Введите ФИО ребёнка (участника концерта):');
         ctx.session.step = BOOKING_STEPS.AWAITING_FULL_NAME;
     }
 });
@@ -879,6 +879,17 @@ bot.on('text', async (ctx) => {
                 return;
             }
 
+            // Check if the phone number already exists, BUT EXCLUDE the current user
+            const { rows: existingUser } = await client.query(
+                'SELECT * FROM users WHERE phone_number = $1 AND telegram_id != $2',
+                [phoneNumber, ctx.from?.id]
+            );
+
+            if (existingUser.length > 0) {
+                ctx.reply('Этот номер телефона уже используется. Пожалуйста, введите другой номер.');
+                return; // Stop further processing
+            }
+
             ctx.session.phoneNumber = phoneNumber;
 
             const { rows: userRows } = await client.query(
@@ -922,7 +933,7 @@ bot.on('text', async (ctx) => {
         }
     } catch (error) {
         console.error('Error processing cancellation:', error);
-        ctx.reply('Произошла ошибка при отмене брони. Попробуйте снова.');
+        ctx.reply('Произошла ошибка при бронировании. Попробуйте снова.');
     } finally {
         client.release();
     }
@@ -1075,13 +1086,11 @@ async function fetchDataAndWriteToSheet() {
     try {
         const { rows: data } = await client.query(`
             SELECT
-                u.full_name as ФИО,
-                u.phone_number as Телефон,
-                json_agg(json_build_object(
-                    'Секция', s.name,
-                    'Ряд', r.row_number,
-                    'Место', st.seat_number
-                )) AS Места
+                u.full_name as "ФИО",
+                u.phone_number as "Телефон",
+                s.name as "Секция",
+                r.row_number as "Ряд",
+                json_agg(st.seat_number) AS "Место"
             FROM
                 users u
             LEFT JOIN
@@ -1090,9 +1099,10 @@ async function fetchDataAndWriteToSheet() {
                 rows r ON st.row_id = r.id
             LEFT JOIN
                 sections s ON r.section_id = s.id
+            WHERE st.booked_by IS NOT NULL
             GROUP BY
-                u.id, u.full_name, u.phone_number
-            ORDER BY u.id;
+                u.id, u.full_name, u.phone_number, s.name, r.row_number
+            ORDER BY u.id, s.name, r.row_number;
         `);
 
         await writeToGoogleSheet(data);
@@ -1121,14 +1131,22 @@ async function writeToGoogleSheet(data: any[]) {
 
         await sheet.setHeaderRow(['ФИО', 'Телефон', 'Секции', 'Ряды', 'Места', 'Оплата']);
 
-        const rows = data.map(item => {
-            const секции = item.Места.map((место: any) => место.Секция).join(', ');
-            const ряды = item.Места.map((место: any) => место.Ряд).join(', ');
-            const места = item.Места.map((место: any) => место.Место).join(', ');
-            return [item.ФИО, item.Телефон, секции, ряды, места];
-        });
+        const rowsToAdd = [];
+        let previousFio = "";
+        let previousPhone = "";
 
-        await sheet.addRows(rows);
+
+        for (const item of data) {
+            const fioToAdd = item.ФИО !== previousFio ? item.ФИО : null;
+            const phoneToAdd = item.Телефон !== previousPhone ? item.Телефон : null;
+
+
+            rowsToAdd.push([fioToAdd, phoneToAdd, item.Секция, item.Ряд, item.Место.join(', ')]);
+            previousFio = item.ФИО;
+            previousPhone = item.Телефон;
+        }
+
+        await sheet.addRows(rowsToAdd);
 
     } catch (error) {
         console.error('Error writing to Google Sheet:', error);
