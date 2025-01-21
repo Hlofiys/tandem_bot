@@ -20,6 +20,10 @@ interface TgContext extends Context {
     session?: SessionData;
 }
 const MAX_SEATS_PER_USER = 4;
+const booking_sheet_name = process.env.BOOKING_SHEET;
+if (booking_sheet_name == undefined) {
+    console.error('Booking sheet name is not defined');
+}
 const token = process.env.BOT_TOKEN;
 if (token == undefined) {
     console.error('Token is not defined');
@@ -108,6 +112,7 @@ if (process.env.GOOGLE_SHEET_ID == undefined)
 
 // Google Sheets configuration
 const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID!, serviceAccountAuth);
+const bookingsDoc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_BOOKINGS_ID!, serviceAccountAuth);
 
 // Обработчик команды /start
 bot.start(async (ctx) => {
@@ -1144,8 +1149,8 @@ async function fetchDataAndWriteToSheet() {
 
 async function writeToGoogleSheet(data: any[]) {
     try {
-        await doc.loadInfo();
-        const sheet = await ensureSheetExists('Брони');
+        await bookingsDoc.loadInfo();
+        const sheet = await ensureSheetExistsInDoc(bookingsDoc, booking_sheet_name!);
         await sheet.loadCells();
 
 
@@ -1181,17 +1186,15 @@ async function writeToGoogleSheet(data: any[]) {
     }
 }
 
-
-async function ensureSheetExists(title: string): Promise<GoogleSpreadsheetWorksheet> {
+async function ensureSheetExistsInDoc(doc: GoogleSpreadsheet, title: string): Promise<GoogleSpreadsheetWorksheet> {
     try {
-
         let sheet = doc.sheetsByTitle[title];
         if (!sheet) {
             sheet = await doc.addSheet({ title });
         }
         return sheet;
     } catch (error) {
-        console.error('Error creating sheet');
+        console.error(`Error creating sheet "${title}" in document:`, error);
         throw error;
     }
 }

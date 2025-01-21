@@ -13,8 +13,10 @@ services:
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - GOOGLE_SHEET_ID=${GOOGLE_SHEET_ID}
+      - GOOGLE_SHEET_BOOKINGS_ID=${GOOGLE_SHEET_BOOKINGS_ID}
       - GOOGLE_SERVICE_ACCOUNT_EMAIL=${GOOGLE_SERVICE_ACCOUNT_EMAIL}
       - GOOGLE_PRIVATE_KEY=${GOOGLE_PRIVATE_KEY}
+      - BOOKING_SHEET=${BOOKING_SHEET}
     restart: unless-stopped
   tandem_db:
     container_name: tandem_db
