@@ -53,7 +53,7 @@ bot.telegram.setMyCommands(commands)
 const pool = new Pool({
     user: 'postgres',
     host: 'tandem_db',
-    database: 'bot',
+    database: process.env.DB_NAME ?? 'bot',
     password: 'postgres',
     port: 5432,
 });
