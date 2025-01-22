@@ -116,7 +116,7 @@ const bookingsDoc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_BOOKINGS_ID!,
 
 // Обработчик команды /start
 bot.start(async (ctx) => {
-    ctx.reply('Добро пожаловать в в систему бронирования мест на ЗОК 2025 в 12:30. Введите /book для начала бронирования.');
+    ctx.reply(`Добро пожаловать в в систему бронирования мест на ЗОК 2025 в ${process.env.EVENT_TIME ?? '12:30'}. Введите /book для начала бронирования.`);
 });
 
 // Обработчик команды /book
