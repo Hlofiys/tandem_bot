@@ -37,7 +37,7 @@ interface SessionData {
 interface TgContext extends Context {
     session?: SessionData;
 }
-const MAX_SEATS_PER_USER = Number(process.env.MAX_SEATS ?? 4);
+const MAX_SEATS_PER_USER = Number(process.env.MAX_SEATS ?? 2);
 const booking_sheet_name = process.env.BOOKING_SHEET;
 if (booking_sheet_name == undefined) {
     console.error('Booking sheet name is not defined');
@@ -70,10 +70,10 @@ bot.telegram.setMyCommands(commands)
 // Инициализация подключения к базе данных PostgreSQL
 const pool = new Pool({
     user: 'postgres',
-    host: '100.93.109.17',
+    host: 'tandem_db',
     database: process.env.DB_NAME ?? 'bot',
     password: 'postgres',
-    port: 9000,
+    port: 5432,
 });
 
 // Создание таблиц для хранения данных (выполняется один раз)
