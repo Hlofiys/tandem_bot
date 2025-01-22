@@ -19,7 +19,7 @@ interface SessionData {
 interface TgContext extends Context {
     session?: SessionData;
 }
-const MAX_SEATS_PER_USER = 4;
+const MAX_SEATS_PER_USER = Number(process.env.MAX_SEATS ?? 4);
 const booking_sheet_name = process.env.BOOKING_SHEET;
 if (booking_sheet_name == undefined) {
     console.error('Booking sheet name is not defined');
@@ -341,7 +341,12 @@ bot.action(/row_(.+)_(.+)/, async (ctx) => {
     }
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
+    try{
     ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}, Ряд ${rowNumber}\nВыберите место:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+    }
+    catch(error) {
+        console.log()
+    }
 });
 
 
