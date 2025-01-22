@@ -4,6 +4,24 @@ import { Pool } from 'pg';
 import { BotCommand } from 'telegraf/types';
 import { GoogleSpreadsheet, GoogleSpreadsheetWorksheet } from 'google-spreadsheet';
 import { JWT } from 'google-auth-library';
+import { backOff } from 'exponential-backoff';
+
+async function retryWithBackoff<T>(func: () => Promise<T>): Promise<T> {
+    return backOff(() => func(), {
+        delayFirstAttempt: false,
+        startingDelay: 100, // Start with 100ms delay
+        maxDelay: 60000,    // Max delay of 1 minute
+        retry: (err: any) => {
+            console.error("Error during Google Sheets operation:", err);
+            return err?.message?.includes("429") || err?.code === 429; // Retry on 429 (Too Many Requests)
+        }
+    });
+}
+
+async function loadSheetWithBackoff(sheet: GoogleSpreadsheetWorksheet) {
+    return retryWithBackoff(() => sheet.loadCells('A1:AH30'));
+}
+
 
 interface SessionData {
     step?: string;
@@ -52,10 +70,10 @@ bot.telegram.setMyCommands(commands)
 // Инициализация подключения к базе данных PostgreSQL
 const pool = new Pool({
     user: 'postgres',
-    host: 'tandem_db',
+    host: '100.93.109.17',
     database: process.env.DB_NAME ?? 'bot',
     password: 'postgres',
-    port: 5432,
+    port: 9000,
 });
 
 // Создание таблиц для хранения данных (выполняется один раз)
@@ -160,8 +178,12 @@ bot.action(/^cancel_section_(.+)/, async (ctx) => {
         Markup.button.callback(`Ряд ${row.row_number}`, `cancel_row_${sectionName}_${row.row_number}`)
     );
     sectionButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
-
-    ctx.editMessageText(`Выберите ряд для отмены (Секция ${sectionName}):`, Markup.inlineKeyboard(sectionButtons, { columns: 3 }));
+    try {
+        ctx.editMessageText(`Выберите ряд для отмены (Секция ${sectionName}):`, Markup.inlineKeyboard(sectionButtons, { columns: 3 }));
+    }
+    catch (error) {
+        console.error('Error during cancel section update text: ', error)
+    }
 });
 
 bot.action(/^cancel_row_(.+)_(.+)/, async (ctx) => {
@@ -190,8 +212,13 @@ bot.action(/^cancel_row_(.+)_(.+)/, async (ctx) => {
         rowButtons.push(Markup.button.callback('Подтвердить отмену', 'confirm_cancellation'));
     }
     rowButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
+    try {
+        ctx.editMessageText(`Выберите места для отмены (Секция ${sectionName}, Ряд ${rowNumber}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+    }
+    catch (error) {
+        console.error('Error during cancel row update text: ', error)
+    }
 
-    ctx.editMessageText(`Выберите места для отмены (Секция ${sectionName}, Ряд ${rowNumber}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
 });
 
 
@@ -237,8 +264,12 @@ bot.action(/cancel_seat_(.+)_(.+)_(.+)/, async (ctx) => {
         rowButtons.push(Markup.button.callback('Подтвердить отмену', 'confirm_cancellation'));
     }
     rowButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
-
-    ctx.editMessageText(`Выберите места для отмены (Секция ${sectionName}, Ряд ${rowNumber}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+    try {
+        ctx.editMessageText(`Выберите места для отмены (Секция ${sectionName}, Ряд ${rowNumber}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+    }
+    catch (error) {
+        console.error('Error during cancel seat update text: ', error)
+    }
 
 });
 
@@ -289,7 +320,12 @@ bot.action(/^cancel_back_to_row_(.+)/, async (ctx) => {
 
 
         rowButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
-        ctx.editMessageText(`Выберите ряд для отмены (Секция ${sectionName}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+        try {
+            ctx.editMessageText(`Выберите ряд для отмены (Секция ${sectionName}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+        }
+        catch (error) {
+            console.error('Error during cancel back to row update text: ', error)
+        }
     }
 });
 
@@ -310,7 +346,13 @@ bot.action(/section_(.+)/, async (ctx) => {
     sectionButtons.push(Markup.button.callback('Отмена', 'cancel_booking')); // Add cancel button
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
-    return ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}\nВыберите ряд:`, Markup.inlineKeyboard(sectionButtons, { columns: 3 }));
+    try {
+        ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}\nВыберите ряд:`, Markup.inlineKeyboard(sectionButtons, { columns: 3 }));
+    }
+    catch (error) {
+        console.error('Error during select section update text: ', error)
+    }
+
 });
 
 bot.action(/row_(.+)_(.+)/, async (ctx) => {
@@ -341,11 +383,11 @@ bot.action(/row_(.+)_(.+)/, async (ctx) => {
     }
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
-    try{
-    ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}, Ряд ${rowNumber}\nВыберите место:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+    try {
+        ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}, Ряд ${rowNumber}\nВыберите место:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
     }
-    catch(error) {
-        console.log()
+    catch (error) {
+        console.error('Error during select row update text: ', error)
     }
 });
 
@@ -449,7 +491,7 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
 
 async function checkCellColorBulk(seats: { section: string; row: number; seat: number }[]): Promise<{ [key: string]: boolean | null }> {
     try {
-        await doc.loadInfo(); // Load sheet info once outside the loop
+        await retryWithBackoff(() => doc.loadInfo()); // retry loadInfo
         const results: { [key: string]: boolean | null } = {};
 
         const sheetsToLoad: { [section: string]: boolean } = {}; // Track which sheets need loading
@@ -463,7 +505,7 @@ async function checkCellColorBulk(seats: { section: string; row: number; seat: n
         const sheetPromises = Object.keys(sheetsToLoad).map(async sectionName => {
             const sheet = doc.sheetsByTitle[sectionName];
             if (sheet) {
-                await sheet.loadCells('A1:AH30');
+                await loadSheetWithBackoff(sheet);
                 return { sectionName, sheet };
             }
             return null;
@@ -510,7 +552,7 @@ async function checkCellColorBulk(seats: { section: string; row: number; seat: n
 
 async function updateSeatsAndSheet(seats: { section: string; row: number; seat: number }[], userId: number, isBooking: boolean, ctx: TgContext) {
     try {
-        await doc.loadInfo(); // Load sheet info once outside the loop
+        await retryWithBackoff(() => doc.loadInfo());
 
         const client = await pool.connect();
         try {
@@ -544,7 +586,7 @@ async function updateSeatsAndSheet(seats: { section: string; row: number; seat: 
                         sheet = await doc.addSheet({ title: seat.section });
                     }
 
-                    await sheet.loadCells('A1:AH30'); //Load cells for the section
+                    await loadSheetWithBackoff(sheet); // Use backoff here
                     sheetsToUpdate[seat.section] = sheet; //Store loaded sheet for reuse
                 }
 
@@ -555,7 +597,7 @@ async function updateSeatsAndSheet(seats: { section: string; row: number; seat: 
             }
 
 
-            const updatePromises = Object.values(sheetsToUpdate).map(sheet => sheet.saveUpdatedCells()); // Update all modified sheets
+            const updatePromises = Object.values(sheetsToUpdate).map(sheet => retryWithBackoff(() => sheet.saveUpdatedCells())); // Backoff on saveUpdatedCells
             await Promise.all(updatePromises);
 
             await client.query('COMMIT'); // Commit transaction
@@ -730,7 +772,12 @@ bot.action('back_to_section', async (ctx) => {
     );
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
-    return ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\nВыберите секцию:`, Markup.inlineKeyboard(sectionButtons, { columns: 2 }));
+    try {
+        ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\nВыберите секцию:`, Markup.inlineKeyboard(sectionButtons, { columns: 2 }));
+    }
+    catch (error) {
+        console.error('Error during back to section update text: ', error)
+    }
 
 });
 
@@ -740,7 +787,12 @@ bot.action('cancel_booking', async (ctx) => {
         ctx.session.selectedSeats = [];
         ctx.session.step = undefined;
     }
-    ctx.editMessageText('Бронирование отменено.');
+    try {
+        ctx.editMessageText('Бронирование отменено.');
+    }
+    catch (error) {
+        console.error('Error during cancel booking update text: ', error)
+    }
     await ctx.answerCbQuery();  // Important: Acknowledge the callback query
 });
 
@@ -760,7 +812,12 @@ bot.action(/back_to_row_(.+)/, async (ctx) => {
     rowButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
-    ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТеущий выбор:\nСекция ${sectionName}\nВыберите ряд:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+    try {
+        ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТеущий выбор:\nСекция ${sectionName}\nВыберите ряд:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+    }
+    catch (error) {
+        console.error('Error during back to row update text: ', error)
+    }
 });
 
 // Обработчик команды /mybookings
@@ -979,7 +1036,7 @@ bot.on('text', async (ctx) => {
 
 async function checkSpreadsheetChanges() {
     try {
-        await doc.loadInfo();
+        await retryWithBackoff(() => doc.loadInfo()); // Retry load info
         const client = await pool.connect();
 
         try {
@@ -989,7 +1046,7 @@ async function checkSpreadsheetChanges() {
             const sheets = await Promise.all(sectionNames.map(async sectionName => {
                 const sheet = doc.sheetsByTitle[sectionName];
                 if (sheet) {
-                    await sheet.loadCells('A1:AH30');
+                    await loadSheetWithBackoff(sheet); // Use the retry function
                     return sheet;
                 }
                 return null;

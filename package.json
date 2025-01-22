@@ -12,6 +12,7 @@
   "dependencies": {
     "@telegraf/session": "^2.0.0-beta.7",
     "@types/pg": "^8.11.10",
+    "exponential-backoff": "^3.1.1",
     "google-auth-library": "^9.15.0",
     "google-spreadsheet": "^4.1.4",
     "pg": "^8.13.1",
