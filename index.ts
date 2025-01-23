@@ -4,23 +4,6 @@ import { Pool } from 'pg';
 import { BotCommand } from 'telegraf/types';
 import { GoogleSpreadsheet, GoogleSpreadsheetWorksheet } from 'google-spreadsheet';
 import { JWT } from 'google-auth-library';
-import { backOff } from 'exponential-backoff';
-
-async function retryWithBackoff<T>(func: () => Promise<T>): Promise<T> {
-    return backOff(() => func(), {
-        delayFirstAttempt: false,
-        startingDelay: 100, // Start with 100ms delay
-        maxDelay: 60000,    // Max delay of 1 minute
-        retry: (err: any) => {
-            console.error("Error during Google Sheets operation:", err);
-            return err?.message?.includes("429") || err?.code === 429; // Retry on 429 (Too Many Requests)
-        }
-    });
-}
-
-async function loadSheetWithBackoff(sheet: GoogleSpreadsheetWorksheet) {
-    return retryWithBackoff(() => sheet.loadCells('A1:AH30'));
-}
 
 
 interface SessionData {
@@ -491,7 +474,7 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
 
 async function checkCellColorBulk(seats: { section: string; row: number; seat: number }[]): Promise<{ [key: string]: boolean | null }> {
     try {
-        await retryWithBackoff(() => doc.loadInfo()); // retry loadInfo
+        await doc.loadInfo(); // retry loadInfo
         const results: { [key: string]: boolean | null } = {};
 
         const sheetsToLoad: { [section: string]: boolean } = {}; // Track which sheets need loading
@@ -505,7 +488,7 @@ async function checkCellColorBulk(seats: { section: string; row: number; seat: n
         const sheetPromises = Object.keys(sheetsToLoad).map(async sectionName => {
             const sheet = doc.sheetsByTitle[sectionName];
             if (sheet) {
-                await loadSheetWithBackoff(sheet);
+                await sheet.loadCells('A1:AH30');
                 return { sectionName, sheet };
             }
             return null;
@@ -552,7 +535,7 @@ async function checkCellColorBulk(seats: { section: string; row: number; seat: n
 
 async function updateSeatsAndSheet(seats: { section: string; row: number; seat: number }[], userId: number, isBooking: boolean, ctx: TgContext) {
     try {
-        await retryWithBackoff(() => doc.loadInfo());
+        await doc.loadInfo();
 
         const client = await pool.connect();
         try {
@@ -586,7 +569,7 @@ async function updateSeatsAndSheet(seats: { section: string; row: number; seat: 
                         sheet = await doc.addSheet({ title: seat.section });
                     }
 
-                    await loadSheetWithBackoff(sheet); // Use backoff here
+                    await sheet.loadCells('A1:AH30');
                     sheetsToUpdate[seat.section] = sheet; //Store loaded sheet for reuse
                 }
 
@@ -597,7 +580,7 @@ async function updateSeatsAndSheet(seats: { section: string; row: number; seat: 
             }
 
 
-            const updatePromises = Object.values(sheetsToUpdate).map(sheet => retryWithBackoff(() => sheet.saveUpdatedCells())); // Backoff on saveUpdatedCells
+            const updatePromises = Object.values(sheetsToUpdate).map(sheet => sheet.saveUpdatedCells()); // Update all modified sheets
             await Promise.all(updatePromises);
 
             await client.query('COMMIT'); // Commit transaction
@@ -997,6 +980,9 @@ bot.on('text', async (ctx) => {
 
             const userId = userRows[0].id;
 
+            const bookedSeats: { section: string; row: number; seat: number }[] = [];
+            const successfullyBookedSeats: { section: string; row: number; seat: number }[] = [];
+
             for (const seat of ctx.session.selectedSeats || []) {
                 const { rows: seatCheck } = await client.query(
                     `SELECT is_booked FROM seats 
@@ -1009,19 +995,36 @@ bot.on('text', async (ctx) => {
                     [seat.section, seat.row, seat.seat]
                 );
 
-                if (seatCheck.length === 0) {  // Место уже забронировано кем-то другим
-                    ctx.reply(`Место ${seat.seat} в секции ${seat.section}, ряд ${seat.row} уже забронировано. Пожалуйста, выберите другое место.`);
-                    return; // Прерываем бронирование
+                if (seatCheck.length === 0) {
+                    bookedSeats.push(seat);
+                } else {
+                    successfullyBookedSeats.push(seat);
                 }
             }
 
-            try {
-                await updateSeatsAndSheet(ctx.session.selectedSeats || [], userId, true, ctx);
-                ctx.reply('Бронь успешно подтверждена. Спасибо!\nИспользуйте /mybookings для просмотра броней.\nИспользуйте /cancel для отмени брони\nИспользуйте /book для бронирования дополнительных мест');
-                ctx.session = {};
-            } catch (error) {
-                // Error is already handled in updateSeatsAndSheet
+            if (bookedSeats.length > 0) {
+                const bookedSeatsString = bookedSeats.map(s => `Место ${s.seat} в секции ${s.section}, ряд ${s.row}`).join('\n');
+                ctx.reply(`${bookedSeatsString} уже забронировано. Пожалуйста, выберите другое место.`);
             }
+
+            if (successfullyBookedSeats.length > 0) {
+                try {
+                   await updateSeatsAndSheet(successfullyBookedSeats, userId, true, ctx);
+                   const successfullyBookedSeatsString = successfullyBookedSeats.map(s => `Место ${s.seat} в секции ${s.section}, ряд ${s.row}`).join('\n');
+                   ctx.reply(`${successfullyBookedSeatsString} \nБронь успешно подтверждена. Спасибо!\nИспользуйте /mybookings для просмотра броней.\nИспользуйте /cancel для отмени брони\nИспользуйте /book для бронирования дополнительных мест`);
+                  ctx.session = {}; // Clear session after successful booking
+
+                }
+                catch (error) {
+                    // Error is already handled in updateSeatsAndSheet
+                }
+            }
+
+           if(successfullyBookedSeats.length === 0 && bookedSeats.length > 0) {
+               ctx.session.selectedSeats = []; // Clear the selected seats if all were booked
+               ctx.session.step = BOOKING_STEPS.SELECT_SECTION;
+               startBooking(ctx);
+           }
         }
         else {
             ctx.reply('Используйте команду /book для начала бронирования или /mybookings для просмотра броней.');
@@ -1036,7 +1039,7 @@ bot.on('text', async (ctx) => {
 
 async function checkSpreadsheetChanges() {
     try {
-        await retryWithBackoff(() => doc.loadInfo()); // Retry load info
+        await doc.loadInfo();
         const client = await pool.connect();
 
         try {
@@ -1046,7 +1049,7 @@ async function checkSpreadsheetChanges() {
             const sheets = await Promise.all(sectionNames.map(async sectionName => {
                 const sheet = doc.sheetsByTitle[sectionName];
                 if (sheet) {
-                    await loadSheetWithBackoff(sheet); // Use the retry function
+                    await sheet.loadCells('A1:AH30');
                     return sheet;
                 }
                 return null;
