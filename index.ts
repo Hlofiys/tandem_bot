@@ -5,6 +5,8 @@ import { BotCommand } from 'telegraf/types';
 import { GoogleSpreadsheet, GoogleSpreadsheetWorksheet } from 'google-spreadsheet';
 import { JWT } from 'google-auth-library';
 
+const MAX_SEATS_PER_USER_BEFORE_THRESHOLD = Number(process.env.MAX_SEATS_BEFORE_THRESHOLD ?? 2);
+const MAX_SEATS_PER_USER_AFTER_THRESHOLD = Number(process.env.MAX_SEATS_AFTER_THRESHOLD ?? 1);
 
 interface SessionData {
     step?: string;
@@ -20,7 +22,6 @@ interface SessionData {
 interface TgContext extends Context {
     session?: SessionData;
 }
-const MAX_SEATS_PER_USER = Number(process.env.MAX_SEATS ?? 2);
 const booking_sheet_name = process.env.BOOKING_SHEET;
 if (booking_sheet_name == undefined) {
     console.error('Booking sheet name is not defined');
@@ -256,6 +257,36 @@ bot.action(/cancel_seat_(.+)_(.+)_(.+)/, async (ctx) => {
 
 });
 
+let usersWithTwoSeatsCache = 0;
+
+async function refreshUsersWithTwoSeatsCache() {
+    const client = await pool.connect();
+    try {
+        // Count users who have 2 or more booked seats
+        const { rows } = await client.query(`
+            SELECT COUNT(*) FROM (
+                SELECT booked_by, COUNT(*) as seat_count
+                FROM seats
+                WHERE is_booked = TRUE AND booked_by IS NOT NULL
+                GROUP BY booked_by
+                HAVING COUNT(*) >= 2
+            ) AS users_with_two
+        `);
+        usersWithTwoSeatsCache = parseInt(rows[0].count, 10);
+    } finally {
+        client.release();
+    }
+}
+
+setInterval(refreshUsersWithTwoSeatsCache, 10 * 1000); // every 10 seconds
+refreshUsersWithTwoSeatsCache(); // initial call
+
+function getCurrentUserSeatLimitCached(): number {
+    return usersWithTwoSeatsCache < 250
+        ? MAX_SEATS_PER_USER_BEFORE_THRESHOLD
+        : MAX_SEATS_PER_USER_AFTER_THRESHOLD;
+}
+
 bot.action('confirm_cancellation', async (ctx) => {
     if (!ctx.session || !ctx.session.selectedSeats || ctx.session.selectedSeats.length === 0) {
         return ctx.reply('Вы не выбрали места для отмены.');
@@ -274,6 +305,8 @@ bot.action('confirm_cancellation', async (ctx) => {
 
         try {
             await updateSeatsAndSheet(ctx.session.selectedSeats, userId, false, ctx);
+            // Update cache after cancellation
+            await refreshUsersWithTwoSeatsCache();
             ctx.reply(`${ctx.session.selectedSeats.length} мест(а) успешно отменено.`);
             ctx.session.step = undefined; // Clear the session after cancellation
             ctx.session.selectedSeats = []; // Clear selected seats
@@ -399,11 +432,11 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
         ctx.answerCbQuery(`Место ${seatNumber} снято с брони.`);
     } else if (!selectedSeat?.isBookedByUser && !selectedSeat?.isBooked) { // Проверка на undefined и isBookedByUser
         // Check if adding this seat exceeds the limit
-        if (ctx.session.selectedSeats.length >= MAX_SEATS_PER_USER) {
-            ctx.answerCbQuery(`Вы можете забронировать максимум ${MAX_SEATS_PER_USER} места.`);
+        const currentLimit = getCurrentUserSeatLimitCached();
+        if (ctx.session.selectedSeats.length >= currentLimit) {
+            ctx.answerCbQuery(`Вы можете забронировать максимум ${currentLimit} места.`);
             return;
         }
-
 
         const client = await pool.connect();
 
@@ -413,12 +446,10 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
                 [ctx.from.id]
             )
 
-
-            if (parseInt(userBookings.rows[0].count) + ctx.session.selectedSeats.length >= MAX_SEATS_PER_USER) {
-                ctx.answerCbQuery(`Вы можете забронировать максимум ${MAX_SEATS_PER_USER} места.`);
+            if (parseInt(userBookings.rows[0].count) + ctx.session.selectedSeats.length >= currentLimit) {
+                ctx.answerCbQuery(`Вы можете забронировать максимум ${currentLimit} места.`);
                 return;
             }
-
 
         } catch (error) {
             console.log("Failed to get user bookings")
@@ -1010,6 +1041,8 @@ bot.on('text', async (ctx) => {
             if (successfullyBookedSeats.length > 0) {
                 try {
                    await updateSeatsAndSheet(successfullyBookedSeats, userId, true, ctx);
+                   // Update cache after booking
+                   await refreshUsersWithTwoSeatsCache();
                    const successfullyBookedSeatsString = successfullyBookedSeats.map(s => `Место ${s.seat} в секции ${s.section}, ряд ${s.row}`).join('\n');
                    ctx.reply(`${successfullyBookedSeatsString} \nБронь успешно подтверждена. Спасибо!\nИспользуйте /mybookings для просмотра броней.\nИспользуйте /cancel для отмени брони\nИспользуйте /book для бронирования дополнительных мест`);
                   ctx.session = {}; // Clear session after successful booking
