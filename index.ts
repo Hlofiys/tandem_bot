@@ -116,6 +116,19 @@ if (process.env.GOOGLE_SHEET_ID == undefined)
 const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID!, serviceAccountAuth);
 const bookingsDoc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_BOOKINGS_ID!, serviceAccountAuth);
 
+// Add this error handler function at the top of the file, after imports
+function handleTelegramError(error: any, operation: string) {
+  if (error.description) {
+    if (error.description.includes('message is not modified') || 
+        error.description.includes('query is too old') ||
+        error.description.includes('query ID is invalid')) {
+      console.log(`Telegram API non-critical error during ${operation}: ${error.description}`);
+      return; // Non-critical error, just log it
+    }
+  }
+  console.error(`Error during ${operation}:`, error);
+}
+
 // Обработчик команды /start
 bot.start(async (ctx) => {
     ctx.reply(`Добро пожаловать в в систему бронирования мест на ЗОК 2025 в ${process.env.EVENT_TIME ?? '12:30'}. Введите /book для начала бронирования.`);
@@ -163,10 +176,15 @@ bot.action(/^cancel_section_(.+)/, async (ctx) => {
     );
     sectionButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
     try {
-        ctx.editMessageText(`Выберите ряд для отмены (Секция ${sectionName}):`, Markup.inlineKeyboard(sectionButtons, { columns: 3 }));
+        await ctx.editMessageText(`Выберите ряд для отмены (Секция ${sectionName}):`, Markup.inlineKeyboard(sectionButtons, { columns: 3 }));
     }
     catch (error) {
-        console.error('Error during cancel section update text: ', error)
+        handleTelegramError(error, "cancel section update text");
+    }
+    try {
+        await ctx.answerCbQuery();
+    } catch (error) {
+        handleTelegramError(error, "answering callback query for cancel section");
     }
 });
 
@@ -197,12 +215,16 @@ bot.action(/^cancel_row_(.+)_(.+)/, async (ctx) => {
     }
     rowButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
     try {
-        ctx.editMessageText(`Выберите места для отмены (Секция ${sectionName}, Ряд ${rowNumber}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+        await ctx.editMessageText(`Выберите места для отмены (Секция ${sectionName}, Ряд ${rowNumber}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
     }
     catch (error) {
-        console.error('Error during cancel row update text: ', error)
+        handleTelegramError(error, "cancel row update text");
     }
-
+    try {
+        await ctx.answerCbQuery();
+    } catch (error) {
+        handleTelegramError(error, "answering callback query for cancel row");
+    }
 });
 
 
@@ -225,10 +247,18 @@ bot.action(/cancel_seat_(.+)_(.+)_(.+)/, async (ctx) => {
 
     if (existingSeatIndex > -1) {
         ctx.session.selectedSeats.splice(existingSeatIndex, 1); // Remove if already selected
-        ctx.answerCbQuery(`Место ${seatNumber} снято с отмены.`);
+        try {
+            await ctx.answerCbQuery(`Место ${seatNumber} снято с отмены.`);
+        } catch (error) {
+            handleTelegramError(error, "answering callback query for cancel seat removal");
+        }
     } else {
         ctx.session.selectedSeats.push(seatInfo); // Add to selected seats
-        ctx.answerCbQuery(`Место ${seatNumber} добавлено к отмене.`);
+        try {
+            await ctx.answerCbQuery(`Место ${seatNumber} добавлено к отмене.`);
+        } catch (error) {
+            handleTelegramError(error, "answering callback query for cancel seat addition");
+        }
     }
 
     // Re-render the seats buttons with updated selection
@@ -249,12 +279,11 @@ bot.action(/cancel_seat_(.+)_(.+)_(.+)/, async (ctx) => {
     }
     rowButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
     try {
-        ctx.editMessageText(`Выберите места для отмены (Секция ${sectionName}, Ряд ${rowNumber}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+        await ctx.editMessageText(`Выберите места для отмены (Секция ${sectionName}, Ряд ${rowNumber}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
     }
     catch (error) {
-        console.error('Error during cancel seat update text: ', error)
+        handleTelegramError(error, "cancel seat update text");
     }
-
 });
 
 let usersWithTwoSeatsCache = 0;
@@ -292,7 +321,11 @@ bot.action('confirm_cancellation', async (ctx) => {
         return ctx.reply('Вы не выбрали места для отмены.');
     }
 
-    await ctx.deleteMessage();
+    try {
+        await ctx.deleteMessage();
+    } catch (error) {
+        handleTelegramError(error, "deleting message during cancellation confirmation");
+    }
 
     const client = await pool.connect();
     try {
@@ -320,7 +353,11 @@ bot.action('confirm_cancellation', async (ctx) => {
 
     } finally {
         client.release();
-        await ctx.answerCbQuery();
+        try {
+            await ctx.answerCbQuery();
+        } catch (error) {
+            handleTelegramError(error, "answering callback query after cancellation confirmation");
+        }
     }
 });
 
@@ -337,10 +374,15 @@ bot.action(/^cancel_back_to_row_(.+)/, async (ctx) => {
 
         rowButtons.push(Markup.button.callback('Отмена', 'cancel_booking'));
         try {
-            ctx.editMessageText(`Выберите ряд для отмены (Секция ${sectionName}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+            await ctx.editMessageText(`Выберите ряд для отмены (Секция ${sectionName}):`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
         }
         catch (error) {
-            console.error('Error during cancel back to row update text: ', error)
+            handleTelegramError(error, "cancel back to row update text");
+        }
+        try {
+            await ctx.answerCbQuery();
+        } catch (error) {
+            handleTelegramError(error, "answering callback query for cancel back to row");
         }
     }
 });
@@ -363,12 +405,16 @@ bot.action(/section_(.+)/, async (ctx) => {
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
     try {
-        ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}\nВыберите ряд:`, Markup.inlineKeyboard(sectionButtons, { columns: 3 }));
+        await ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}\nВыберите ряд:`, Markup.inlineKeyboard(sectionButtons, { columns: 3 }));
     }
     catch (error) {
-        console.error('Error during select section update text: ', error)
+        handleTelegramError(error, "select section update text");
     }
-
+    try {
+        await ctx.answerCbQuery();
+    } catch (error) {
+        handleTelegramError(error, "answering callback query for section selection");
+    }
 });
 
 bot.action(/row_(.+)_(.+)/, async (ctx) => {
@@ -400,10 +446,15 @@ bot.action(/row_(.+)_(.+)/, async (ctx) => {
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
     try {
-        ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}, Ряд ${rowNumber}\nВыберите место:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+        await ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТекущий выбор:\nCекция ${sectionName}, Ряд ${rowNumber}\nВыберите место:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
     }
     catch (error) {
-        console.error('Error during select row update text: ', error)
+        handleTelegramError(error, "select row update text");
+    }
+    try {
+        await ctx.answerCbQuery();
+    } catch (error) {
+        handleTelegramError(error, "answering callback query for row selection");
     }
 });
 
@@ -429,12 +480,20 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
 
     if (existingSeatIndex > -1) {
         ctx.session.selectedSeats.splice(existingSeatIndex, 1);
-        ctx.answerCbQuery(`Место ${seatNumber} снято с брони.`);
+        try {
+            await ctx.answerCbQuery(`Место ${seatNumber} снято с брони.`);
+        } catch (error) {
+            handleTelegramError(error, "answering callback query for seat removal");
+        }
     } else if (!selectedSeat?.isBookedByUser && !selectedSeat?.isBooked) { // Проверка на undefined и isBookedByUser
         // Check if adding this seat exceeds the limit
         const currentLimit = getCurrentUserSeatLimitCached();
         if (ctx.session.selectedSeats.length >= currentLimit) {
-            ctx.answerCbQuery(`Вы можете забронировать максимум ${currentLimit} места.`);
+            try {
+                await ctx.answerCbQuery(`Вы можете забронировать максимум ${currentLimit} места.`);
+            } catch (error) {
+                handleTelegramError(error, "answering callback query for seat limit");
+            }
             return;
         }
 
@@ -447,7 +506,11 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
             )
 
             if (parseInt(userBookings.rows[0].count) + ctx.session.selectedSeats.length >= currentLimit) {
-                ctx.answerCbQuery(`Вы можете забронировать максимум ${currentLimit} места.`);
+                try {
+                    await ctx.answerCbQuery(`Вы можете забронировать максимум ${currentLimit} места.`);
+                } catch (error) {
+                    handleTelegramError(error, "answering callback query for user booking limit");
+                }
                 return;
             }
 
@@ -458,13 +521,25 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
         }
 
         ctx.session.selectedSeats.push(seatInfo);
-        ctx.answerCbQuery(`Место ${seatNumber} добавлено к брони.`);
+        try {
+            await ctx.answerCbQuery(`Место ${seatNumber} добавлено к брони.`);
+        } catch (error) {
+            handleTelegramError(error, "answering callback query for seat addition");
+        }
     } else if (selectedSeat?.isBookedByUser) {
-        ctx.answerCbQuery('Это место уже забронировано вами.');
+        try {
+            await ctx.answerCbQuery('Это место уже забронировано вами.');
+        } catch (error) {
+            handleTelegramError(error, "answering callback query for already booked by user");
+        }
         return;
     }
     else {
-        ctx.answerCbQuery('Это место уже занято.');
+        try {
+            await ctx.answerCbQuery('Это место уже занято.');
+        } catch (error) {
+            handleTelegramError(error, "answering callback query for already booked seat");
+        }
         return;
     }
 
@@ -498,8 +573,7 @@ bot.action(/seat_(.+)_(.+)_(.+)/, async (ctx) => {
             Markup.inlineKeyboard(seatButtons, { columns: 3 })
         );
     } catch (error) {
-        console.error("Error updating message:", error);
-        ctx.reply("Произошла ошибка при обновлении сообщения. Попробуйте еще раз.");
+        handleTelegramError(error, "updating seat selection message");
     }
 });
 
@@ -787,12 +861,16 @@ bot.action('back_to_section', async (ctx) => {
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
     try {
-        ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\nВыберите секцию:`, Markup.inlineKeyboard(sectionButtons, { columns: 2 }));
+        await ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\nВыберите секцию:`, Markup.inlineKeyboard(sectionButtons, { columns: 2 }));
     }
     catch (error) {
-        console.error('Error during back to section update text: ', error)
+        handleTelegramError(error, "back to section update text");
     }
-
+    try {
+        await ctx.answerCbQuery();
+    } catch (error) {
+        handleTelegramError(error, "answering callback query for back to section");
+    }
 });
 
 // Add cancel_booking action
@@ -802,12 +880,16 @@ bot.action('cancel_booking', async (ctx) => {
         ctx.session.step = undefined;
     }
     try {
-        ctx.editMessageText('Бронирование отменено.');
+        await ctx.editMessageText('Бронирование отменено.');
     }
     catch (error) {
-        console.error('Error during cancel booking update text: ', error)
+        handleTelegramError(error, "cancel booking update text");
     }
-    await ctx.answerCbQuery();  // Important: Acknowledge the callback query
+    try {
+        await ctx.answerCbQuery();  // Important: Acknowledge the callback query
+    } catch (error) {
+        handleTelegramError(error, "answering callback query for cancel booking");
+    }
 });
 
 bot.action(/back_to_row_(.+)/, async (ctx) => {
@@ -827,10 +909,15 @@ bot.action(/back_to_row_(.+)/, async (ctx) => {
 
     const selectedSeatsString = getSelectedSeatsString(ctx);
     try {
-        ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТеущий выбор:\nСекция ${sectionName}\nВыберите ряд:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
+        await ctx.editMessageText(`Выбранные места:\n${selectedSeatsString}\n\nТеущий выбор:\nСекция ${sectionName}\nВыберите ряд:`, Markup.inlineKeyboard(rowButtons, { columns: 3 }));
     }
     catch (error) {
-        console.error('Error during back to row update text: ', error)
+        handleTelegramError(error, "back to row update text");
+    }
+    try {
+        await ctx.answerCbQuery();
+    } catch (error) {
+        handleTelegramError(error, "answering callback query for back to row");
     }
 });
 
