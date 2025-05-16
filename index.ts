@@ -326,7 +326,7 @@ setInterval(refreshUsersWithTwoSeatsCache, 10 * 1000); // every 10 seconds
 refreshUsersWithTwoSeatsCache(); // initial call
 
 function getCurrentUserSeatLimitCached(): number {
-    return usersWithTwoSeatsCache < 248
+    return usersWithTwoSeatsCache < 218
         ? MAX_SEATS_PER_USER_BEFORE_THRESHOLD
         : MAX_SEATS_PER_USER_AFTER_THRESHOLD;
 }
